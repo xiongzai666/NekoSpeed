@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/oschwald/maxminddb-golang"
 	"nekospeed/internal/model"
+	"nekospeed/internal/nodepool"
 )
 
 // 在线 GeoIP API 端点。定义为包级变量以便测试替换为 httptest 服务器。
@@ -234,27 +236,26 @@ func resolveServerIP(ctx context.Context, server string) string {
 	if net.ParseIP(server) != nil {
 		return server
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	addrs, err := net.DefaultResolver.LookupIP(ctx, "ip", server)
-	if err != nil || len(addrs) == 0 {
-		return ""
-	}
-	for _, a := range addrs {
-		if a4 := a.To4(); a4 != nil {
-			return a4.String()
+	// 优先读取预检阶段钉住在 mihomo DefaultHosts 中的可达 IP，确保入口展示与实际拨号一致。
+	if hv, ok := resolver.DefaultHosts.Search(server, false); ok && len(hv.IPs) > 0 {
+		for _, ip := range hv.IPs {
+			if !nodepool.IsFakeIPAddr(ip) {
+				return ip.String()
+			}
 		}
 	}
-	return addrs[0].String()
+	return nodepool.ResolveHostDirect(ctx, server)
 }
 
-// httpClient 直连用默认客户端，走代理用 model.HTTPClient（强制 http 由 URL 决定）。
-// 为避免本机 HTTP_PROXY 环境变量干扰，两种客户端都显式禁用 Proxy。
+// httpClient 直连用绑定物理网卡的客户端（绕过系统代理与本地 TUN），走代理用 model.HTTPClient。
 func httpClient(d model.Dialer) *http.Client {
 	if d == nil {
 		return &http.Client{
-			Timeout:   15 * time.Second,
-			Transport: &http.Transport{Proxy: nil},
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				Proxy:       nil,
+				DialContext: nodepool.DialDirectContext,
+			},
 		}
 	}
 	return model.HTTPClient(d, 15*time.Second)

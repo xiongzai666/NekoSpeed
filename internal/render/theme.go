@@ -36,6 +36,7 @@ type Theme struct {
 	ZeroBG  color.RGBA // 速度为 0 单元格
 	BadgeBG color.RGBA // 栈徽章（4/6/46）
 	Spark   color.RGBA // 每秒速度柱状图
+	RateBG  color.RGBA // 底部解锁率汇总行底色
 
 	Watermark color.RGBA // 水印文字颜色（带 Alpha）
 
@@ -47,45 +48,37 @@ type Theme struct {
 	UnlockColors map[model.UnlockStatus]color.RGBA
 }
 
-// DefaultTheme 返回经典浅色主题。
+// DefaultTheme 返回经典 MiaoKo / FFQ 浅色主题（白底、浅灰表头、青蓝延迟渐变、粉红速度渐变、柔和果绿解锁）。
 func DefaultTheme() Theme {
 	return Theme{
-		Name:       "default",
-		ImageBG:    rgb(0xFF, 0xFF, 0xFF),
-		HeaderBG:   rgb(0xE8, 0xE8, 0xE8),
-		RowLine:    rgb(0xD9, 0xD9, 0xD9),
-		Text:       rgb(0x1A, 0x1A, 0x1A),
-		FooterText: rgb(0x1A, 0x1A, 0x1A),
-		IndexFG:    rgb(0xD6, 0x30, 0x31),
-		FailBG:     rgb(0xE0, 0x60, 0x60),
-		ZeroBG:     rgb(0x9E, 0x9E, 0x9E),
-		BadgeBG:    rgb(0x3B, 0x8B, 0xD4),
-		Spark:      rgb(0x2F, 0xB8, 0xD6),
-		Watermark:  color.RGBA{0x9A, 0x9A, 0x9A, 0x30},
-		Pattern:    PatternNone,
-		LatencyStops: []gradStop{
-			{0.0, rgb(0x7B, 0xD8, 0x8F)},
-			{0.3, rgb(0xC2, 0xCF, 0x5C)},
-			{0.6, rgb(0xF0, 0xA0, 0x4B)},
-			{1.0, rgb(0xE0, 0x60, 0x60)},
-		},
-		SpeedStops: []gradStop{
-			{0.0, rgb(0x7B, 0xD8, 0x8F)},
-			{0.5, rgb(0x46, 0xC7, 0xC7)},
-			{1.0, rgb(0x5B, 0x8D, 0xEF)},
-		},
+		Name:         "default",
+		ImageBG:      rgb(0xFF, 0xFF, 0xFF),
+		HeaderBG:     rgb(0xEA, 0xEA, 0xEA),
+		RowLine:      rgb(0xDC, 0xDC, 0xDC),
+		Text:         rgb(0x1A, 0x1A, 0x1A),
+		FooterText:   rgb(0x1A, 0x1A, 0x1A),
+		IndexFG:      rgb(0x1A, 0x1A, 0x1A),
+		FailBG:       rgb(0x88, 0x88, 0x88),
+		ZeroBG:       rgb(0xFB, 0xED, 0xF1),
+		BadgeBG:      rgb(0x2B, 0x82, 0xC9),
+		Spark:        rgb(0xEE, 0x72, 0x99),
+		RateBG:       rgb(0xD5, 0xEB, 0xB8),
+		Watermark:    color.RGBA{0x0D, 0x0D, 0x0D, 0x1A},
+		Pattern:      PatternNone,
+		LatencyStops: fixedLatencyStops,
+		SpeedStops:   fixedSpeedStops,
 		UnlockColors: defaultUnlockColors(),
 	}
 }
 
 func defaultUnlockColors() map[model.UnlockStatus]color.RGBA {
 	return map[model.UnlockStatus]color.RGBA{
-		model.StatusUnlock:    rgb(0x7B, 0xD8, 0x8F),
-		model.StatusPending:   rgb(0xF5, 0xD7, 0x6E),
-		model.StatusSentToCN:  rgb(0xC9, 0xB9, 0x5C),
-		model.StatusFailed:    rgb(0xE0, 0x60, 0x60),
-		model.StatusReqFailed: rgb(0xB0, 0x30, 0x30),
-		model.StatusNA:        rgb(0xA0, 0xA0, 0xA0),
+		model.StatusUnlock:    rgb(0xBE, 0xE8, 0x84),
+		model.StatusPending:   rgb(0xF8, 0xDF, 0x8C),
+		model.StatusSentToCN:  rgb(0xF8, 0xDF, 0x8C),
+		model.StatusFailed:    rgb(0xEA, 0x6A, 0x6A),
+		model.StatusReqFailed: rgb(0xDF, 0x5A, 0x5A),
+		model.StatusNA:        rgb(0x8E, 0x94, 0x9E),
 	}
 }
 
@@ -118,72 +111,127 @@ func hsl(h, s, l float64) color.RGBA {
 	return rgb(uint8((r+m)*255), uint8((g+m)*255), uint8((b+m)*255))
 }
 
-// hsla 同 hsl，并设置 Alpha 通道。
+// hsla 同 hsl，并按预乘 Alpha 通道缩放 R/G/B。
 func hsla(h, s, l, a float64) color.RGBA {
 	c := hsl(h, s, l)
-	c.A = uint8(a * 255)
-	return c
+	return color.RGBA{
+		R: uint8(float64(c.R) * a),
+		G: uint8(float64(c.G) * a),
+		B: uint8(float64(c.B) * a),
+		A: uint8(a * 255),
+	}
 }
 
-// fixedLatencyStops 与主题无关的语义延迟渐变。
+// fixedLatencyStops 复刻 FFQ.LA / MiaoKo 青蓝延迟渐变（低延迟冰青 -> 中延迟天青 -> 高延迟深青灰）。
 var fixedLatencyStops = []gradStop{
-	{0.0, rgb(0x7B, 0xD8, 0x8F)},
-	{0.3, rgb(0xC2, 0xCF, 0x5C)},
-	{0.6, rgb(0xF0, 0xA0, 0x4B)},
-	{1.0, rgb(0xE0, 0x60, 0x60)},
+	{0.00, rgb(0xCE, 0xF0, 0xEC)},
+	{0.12, rgb(0xA4, 0xE2, 0xE4)},
+	{0.30, rgb(0x76, 0xC7, 0xD4)},
+	{0.65, rgb(0x56, 0x92, 0x9E)},
+	{1.00, rgb(0x46, 0x69, 0x6F)},
 }
 
-// fixedSpeedStops 与主题无关的悦目速度渐变：绿 -> 青 -> 蓝。
+// fixedSpeedStops 复刻 FFQ.LA / MiaoKo 樱粉-玫红速度渐变。
 var fixedSpeedStops = []gradStop{
-	{0.0, rgb(0x7B, 0xD8, 0x8F)},
-	{0.5, rgb(0x46, 0xC7, 0xC7)},
-	{1.0, rgb(0x5B, 0x8D, 0xEF)},
+	{0.00, rgb(0xFA, 0xE6, 0xEC)},
+	{0.25, rgb(0xF6, 0xBD, 0xCF)},
+	{0.55, rgb(0xF1, 0x8E, 0xAE)},
+	{0.85, rgb(0xEC, 0x66, 0x92)},
+	{1.00, rgb(0xE6, 0x49, 0x80)},
 }
 
-// makeLightTheme 生成柔和浅色主题，带指定花纹。
-func makeLightTheme(name string, hue float64, pattern Pattern) Theme {
+// blueSpeedStops 复刻品云测速冰青-海蓝速度渐变。
+var blueSpeedStops = []gradStop{
+	{0.00, rgb(0xE6, 0xF9, 0xF6)},
+	{0.25, rgb(0x88, 0xF0, 0xE4)},
+	{0.55, rgb(0x28, 0xDF, 0xDC)},
+	{0.85, rgb(0x25, 0x96, 0xE0)},
+	{1.00, rgb(0x1C, 0x7E, 0xD6)},
+}
+
+// darkLatencyStops 专为深色主题设计的高对比度深青蓝延迟渐变（搭配亮白文字清晰易读）。
+var darkLatencyStops = []gradStop{
+	{0.00, rgb(0x14, 0x6B, 0x62)},
+	{0.12, rgb(0x18, 0x5E, 0x78)},
+	{0.30, rgb(0x1F, 0x4E, 0x78)},
+	{0.65, rgb(0x2C, 0x3E, 0x64)},
+	{1.00, rgb(0x36, 0x36, 0x4F)},
+}
+
+// darkSpeedStops 专为深色主题设计的高对比度深玫红-宝石红速度渐变（搭配亮白文字清晰易读）。
+var darkSpeedStops = []gradStop{
+	{0.00, rgb(0x4A, 0x25, 0x3B)},
+	{0.25, rgb(0x6E, 0x28, 0x4E)},
+	{0.55, rgb(0x91, 0x2B, 0x5E)},
+	{0.85, rgb(0xB0, 0x2E, 0x69)},
+	{1.00, rgb(0xC9, 0x32, 0x72)},
+}
+
+func darkUnlockColors() map[model.UnlockStatus]color.RGBA {
+	return map[model.UnlockStatus]color.RGBA{
+		model.StatusUnlock:    rgb(0x1B, 0x6E, 0x44),
+		model.StatusPending:   rgb(0x8A, 0x5A, 0x14),
+		model.StatusSentToCN:  rgb(0x8A, 0x5A, 0x14),
+		model.StatusFailed:    rgb(0x8C, 0x2A, 0x32),
+		model.StatusReqFailed: rgb(0x7A, 0x22, 0x2A),
+		model.StatusNA:        rgb(0x33, 0x3B, 0x48),
+	}
+}
+
+// makeLightTheme 生成干净无底纹的柔和浅色主题。
+func makeLightTheme(name string, hue float64, _ Pattern) Theme {
+	useBlueSpeed := hue >= 150 && hue <= 250
+	speedStops := fixedSpeedStops
+	sparkCol := rgb(0xEE, 0x72, 0x99)
+	zeroBG := rgb(0xFB, 0xED, 0xF1)
+	if useBlueSpeed {
+		speedStops = blueSpeedStops
+		sparkCol = rgb(0x1C, 0x88, 0xE5)
+		zeroBG = rgb(0xF4, 0xF7, 0xFA)
+	}
 	t := Theme{
-		Name:       name,
-		ImageBG:    hsl(hue, 12, 97),
-		HeaderBG:   hsl(hue, 32, 90),
-		RowLine:    hsl(hue, 15, 90),
-		Text:       hsl(hue, 15, 22),
-		FooterText: hsl(hue, 10, 45),
-		IndexFG:    hsl(0, 78, 50),
-		FailBG:     hsl(0, 68, 72),
-		ZeroBG:     hsl(hue, 10, 72),
-		BadgeBG:    hsl(hue, 62, 52),
-		Spark:      hsl(hue, 72, 52),
-		Watermark:  hsla(hue, 10, 55, 0.15),
-		Pattern:    pattern,
-		PatternColor: hsla(hue, 25, 88, 0.12),
+		Name:         name,
+		ImageBG:      rgb(0xFF, 0xFF, 0xFF),
+		HeaderBG:     rgb(0xEA, 0xEA, 0xEA),
+		RowLine:      rgb(0xDC, 0xDC, 0xDC),
+		Text:         rgb(0x1A, 0x1A, 0x1A),
+		FooterText:   rgb(0x1A, 0x1A, 0x1A),
+		IndexFG:      rgb(0x1A, 0x1A, 0x1A),
+		FailBG:       rgb(0x88, 0x88, 0x88),
+		ZeroBG:       zeroBG,
+		BadgeBG:      rgb(0x2B, 0x82, 0xC9),
+		Spark:        sparkCol,
+		RateBG:       rgb(0xD5, 0xEB, 0xB8),
+		Watermark:    color.RGBA{0x0D, 0x0D, 0x0D, 0x1A},
+		Pattern:      PatternNone,
 		LatencyStops: fixedLatencyStops,
-		SpeedStops:   fixedSpeedStops,
+		SpeedStops:   speedStops,
 		UnlockColors: defaultUnlockColors(),
 	}
 	return t
 }
 
-// makeDarkTheme 生成深色主题，带指定花纹。
+// makeDarkTheme 生成深色主题，带指定花纹与深色专属高对比度渐变。
 func makeDarkTheme(name string, hue float64, pattern Pattern) Theme {
 	t := Theme{
-		Name:       name,
-		ImageBG:    hsl(hue, 10, 14),
-		HeaderBG:   hsl(hue, 20, 22),
-		RowLine:    hsl(hue, 12, 26),
-		Text:       hsl(hue, 10, 92),
-		FooterText: hsl(hue, 8, 70),
-		IndexFG:    hsl(0, 78, 68),
-		FailBG:     hsl(0, 60, 55),
-		ZeroBG:     hsl(hue, 10, 36),
-		BadgeBG:    hsl(hue, 65, 58),
-		Spark:      hsl(hue, 70, 60),
-		Watermark:  hsla(hue, 10, 45, 0.14),
-		Pattern:    pattern,
-		PatternColor: hsla(hue, 15, 32, 0.15),
-		LatencyStops: fixedLatencyStops,
-		SpeedStops:   fixedSpeedStops,
-		UnlockColors: defaultUnlockColors(),
+		Name:         name,
+		ImageBG:      hsl(hue, 14, 13),
+		HeaderBG:     hsl(hue, 20, 21),
+		RowLine:      hsl(hue, 14, 26),
+		Text:         rgb(0xF1, 0xF5, 0xF9),
+		FooterText:   hsl(hue, 12, 78),
+		IndexFG:      hsl(0, 82, 72),
+		FailBG:       rgb(0x8C, 0x2A, 0x32),
+		ZeroBG:       hsl(hue, 12, 24),
+		BadgeBG:      hsl(hue, 65, 52),
+		Spark:        hsl(hue, 75, 62),
+		RateBG:       rgb(0x1E, 0x56, 0x3A),
+		Watermark:    hsla(hue, 10, 50, 0.14),
+		Pattern:      pattern,
+		PatternColor: hsla(hue, 15, 32, 0.12),
+		LatencyStops: darkLatencyStops,
+		SpeedStops:   darkSpeedStops,
+		UnlockColors: darkUnlockColors(),
 	}
 	return t
 }
@@ -242,9 +290,12 @@ var themeRegistry = func() []Theme {
 	return list
 }()
 
-// RandomTheme 从主题库随机返回一个主题。
+// RandomTheme 返回干净的经典浅色主题（在粉红经典与海蓝经典之间选择，不随机深色背景）。
 func RandomTheme() Theme {
-	return themeRegistry[rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(themeRegistry))]
+	if rand.New(rand.NewSource(time.Now().UnixNano())).Intn(2) == 0 {
+		return DefaultTheme()
+	}
+	return ThemeByName("sky_light")
 }
 
 // ThemeByName 按名称查找主题，找不到返回 DefaultTheme。
@@ -278,15 +329,17 @@ func (t Theme) latencyColor(ms int) color.RGBA {
 	return gradient(t.LatencyStops, g)
 }
 
-// speedColor 返回速度（字节/秒）对应的单元格底色。
+// speedColor 返回速度（字节/秒）对应的单元格底色（以 80MB/s 为满饱和基准，幂函数平滑过渡）。
 func (t Theme) speedColor(v float64) color.RGBA {
 	if v <= 0 {
 		return t.SpeedStops[0].c
 	}
-	g := math.Log1p(v) / math.Log1p(1 << 30)
-	if g > 1 {
-		g = 1
+	const fullSpeed = 80 * 1024 * 1024 // 80 MB/s
+	ratio := v / fullSpeed
+	if ratio > 1 {
+		ratio = 1
 	}
+	g := math.Pow(ratio, 0.55)
 	return gradient(t.SpeedStops, g)
 }
 
@@ -298,13 +351,16 @@ func (t Theme) statusColor(s model.UnlockStatus) color.RGBA {
 	return t.UnlockColors[model.StatusNA]
 }
 
-// textOn 按底色亮度选择黑/白文字色。
+// textOn 按底色亮度自适应选择文字颜色：浅色底用深灰黑字，深色底用高对比亮白字。
 func (t Theme) textOn(bg color.RGBA) color.RGBA {
 	lum := 0.299*float64(bg.R) + 0.587*float64(bg.G) + 0.114*float64(bg.B)
-	if lum > 130 {
-		return t.Text
+	if lum > 140 {
+		return rgb(0x1A, 0x1A, 0x1A)
 	}
-	return color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
+	if t.ImageBG.R > 128 && lum > 70 {
+		return rgb(0x1A, 0x1A, 0x1A)
+	}
+	return color.RGBA{0xF8, 0xFA, 0xFC, 0xFF}
 }
 
 // drawPattern 在图片上绘制背景花纹。花纹会先画在整图上，之后再画表格。

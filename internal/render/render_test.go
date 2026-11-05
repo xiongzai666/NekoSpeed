@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+func TestExtractNodeFlag(t *testing.T) {
+	code, clean := extractNodeFlag("🇯🇵 [vip1]日本1|2X")
+	if code != "JP" || clean != "[vip1]日本1|2X" {
+		t.Fatalf("expected JP / [vip1]日本1|2X, got %q / %q", code, clean)
+	}
+	code2, clean2 := extractNodeFlag("香港 IPLC 01")
+	if code2 != "HK" || clean2 != "香港 IPLC 01" {
+		t.Fatalf("expected HK / 香港 IPLC 01, got %q / %q", code2, clean2)
+	}
+}
+
 func TestRandomThemeAndNames(t *testing.T) {
 	if len(ThemeNames()) == 0 {
 		t.Fatal("ThemeNames 不应为空")
@@ -18,7 +29,7 @@ func TestRandomThemeAndNames(t *testing.T) {
 		t.Fatalf("不存在的主题应回退 default, 实际 %q", th.Name)
 	}
 	if th := ThemeByName("rose_light"); th.Name != "rose_light" {
-		t.Fatalf("ThemeByName 应返回 red_light, 实际 %q", th.Name)
+		t.Fatalf("ThemeByName 应返回 rose_light, 实际 %q", th.Name)
 	}
 }
 
@@ -32,6 +43,8 @@ func TestLocalISPTitle(t *testing.T) {
 		{"NekoSpeed | speed - ", "订阅速度", "上海电信", "1Gbps", false, "NekoSpeed | speed - 上海电信@1Gbps"},
 		{"NekoSpeed | speed - ", "订阅速度", "上海电信", "1Gbps", true, "NekoSpeed | speed - 单线程上海电信@1Gbps"},
 		{"NekoSpeed | speed - ", "订阅速度", "上海电信", "", false, "NekoSpeed | speed - 上海电信"},
+		{"NekoSpeed | speed - ", "订阅速度", "", "1Gbps", false, "NekoSpeed | speed - 1Gbps"},
+		{"NekoSpeed | speed - ", "订阅速度", "", "上海电信@1Gbps", false, "NekoSpeed | speed - 上海电信@1Gbps"},
 		{"NekoSpeed | fftest - ", "综合测试", "北京联通", "500Mbps", false, "NekoSpeed | fftest - 北京联通@500Mbps"},
 	}
 	for _, c := range cases {

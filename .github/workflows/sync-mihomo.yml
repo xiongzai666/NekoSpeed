@@ -1,0 +1,160 @@
+name: Sync Mihomo & Auto Release
+
+on:
+  schedule:
+    # 每天北京时间 10:00 (02:00 UTC) 自动检查上游 MetaCubeX/mihomo 是否有新 Release
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: '即使 mihomo 无新版本也强制重新构建并发布 Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-release:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream MetaCubeX/mihomo latest release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(awk '/github.com\/metacubex\/mihomo / {print $2; exit}' go.mod)
+          LATEST=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
+          echo "Current mihomo version: $CURRENT"
+          echo "Latest upstream mihomo: $LATEST"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT" != "$LATEST" ] && [ -n "$LATEST" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$FORCE_RELEASE" = "true" ]; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Go
+        if: steps.check.outputs.should_release == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install CJK Fonts for Render Tests
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk zip
+
+      - name: Upgrade mihomo dependency
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          LATEST="${{ steps.check.outputs.latest }}"
+          go get "github.com/metacubex/mihomo@${LATEST}"
+          go mod tidy
+          sed -i -E "s|github.com/metacubex/mihomo v[0-9.]+|github.com/metacubex/mihomo ${LATEST}|g" README.md || true
+
+      - name: Run Unit Tests
+        if: steps.check.outputs.should_release == 'true'
+        run: go test -v ./...
+
+      - name: Commit & Tag mihomo update
+        id: tag
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          LATEST="${{ steps.check.outputs.latest }}"
+          DATE_STAMP=$(date -u +'%Y.%m.%d')
+          TAG_NAME="v${DATE_STAMP}-${LATEST}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain go.mod go.sum README.md)" ]; then
+            git add go.mod go.sum README.md
+            git commit -m "chore(deps): sync mihomo backend to ${LATEST}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+          # 若同名 tag 已存在则追加短提交号避免冲突
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TAG_NAME="${TAG_NAME}-${SHORT_SHA}"
+          fi
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile all platforms & package archives
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.tag_name }}"
+          mkdir -p dist/release
+
+          targets=(
+            "windows amd64 .exe"
+            "windows arm64 .exe"
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+          )
+
+          for t in "${targets[@]}"; do
+            read -r goos goarch ext <<<"$t"
+            bin_name="nekospeed-${goos}-${goarch}${ext:-}"
+            out_bin="dist/${bin_name}"
+            echo "==> Building ${out_bin}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w" -o "$out_bin" ./cmd/nekospeed
+
+            pkg_name="nekospeed_${VERSION}_${goos}-${goarch}"
+            stage="dist/.stage/${pkg_name}"
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            cp "$out_bin" "$stage/"
+            cp README.md LICENSE "$stage/"
+
+            if [ "$goos" = "windows" ]; then
+              (cd dist/.stage && zip -q -r "../release/${pkg_name}.zip" "${pkg_name}")
+              cp "$out_bin" "dist/release/${bin_name}"
+            else
+              (cd dist/.stage && tar czf "../release/${pkg_name}.tar.gz" "${pkg_name}")
+            fi
+          done
+
+          rm -rf dist/.stage
+          (cd dist/release && sha256sum * > SHA256SUMS.txt)
+
+      - name: Publish GitHub Release
+        if: steps.check.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "NekoSpeed ${{ steps.tag.outputs.tag_name }} (mihomo ${{ steps.check.outputs.latest }})"
+          generate_release_notes: true
+          body: |
+            ### 🚀 自动化构建发布
+            - **Mihomo 内核版本**：[`${{ steps.check.outputs.latest }}`](https://github.com/MetaCubeX/mihomo/releases/tag/${{ steps.check.outputs.latest }})
+            - **内置特性**：
+              - 自动识别并绑定物理网卡（Windows `IP_UNICAST_IF` / macOS `IP_BOUND_IF`），自动绕过本地 Clash TUN 与 `198.18.0.0/15` Fake-IP，防止代理套代理
+              - 极简双行 WebUI 控制台（支持按需挑节点、实时单节点流式上屏、免重测 0.3s 重绘主题/排序、一键复制图片到剪贴板、导出 CSV）
+              - Windows 版支持直接双击 `nekospeed-windows-amd64.exe` 一键启动 WebUI (`http://127.0.0.1:18189`)
+          files: dist/release/*

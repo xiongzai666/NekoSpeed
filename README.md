@@ -36,10 +36,11 @@
 - **测速**：多/单线程下载测速（每秒速度序列、平均、峰值）、TLS RTT、HTTPS 延迟（httptrace 精确计时，TLS1.3）
 - **本地网络标注**：自动探测本机公网 IP 的运营商/城市，并在测速图/综合图标题显示（如 `上海电信@1Gbps`），可手动指定带宽
 - **流媒体解锁**：YouTube / Netflix / Disney+ / B站港澳台 / TikTok / DAZN / Abema / 巴哈姆特 / Steam 货币 / Spotify
-- **AI 解锁**：OpenAI / Copilot / Gemini / MetaAI / Claude / Perplexity / Sora
+- **AI 解锁**：ChatGPT (OpenAI) / Copilot / Gemini / MetaAI / Claude / Perplexity / Sora / Grok
 - **线路分析**：入口（节点服务器 IP 归属）/ 出口（落地 IP 归属）聚合表，GeoLite2 mmdb 或在线 API
 - **UDP NAT 类型**：STUN（RFC 5780）检测 FullCone / Restricted / PortRestricted / Symmetric
-- **内嵌 Web UI**：`-web` 一键启动浏览器操作界面（填订阅、实时日志、查看/下载结果图），零额外文件
+- **内嵌 Web UI**：`-web`（或 Windows 直接双击 exe）一键启动浏览器操作界面（支持订阅预览挑节点、单节点实时流式上屏、免重测秒级重绘主题/排序、一键复制图片到剪贴板、导出 CSV），零额外文件
+- **自动绑定物理网卡（防 TUN 代理套代理）**：自动识别本机真实物理网卡并经 `IP_UNICAST_IF` / `IP_BOUND_IF` 直连出站，自动绕过本地 Clash TUN 与 `198.18.0.0/15` Fake-IP
 - **IP 预检**：多公共 DNS 采样节点服务器 IP + TCP 探测，锁定当前可达 IP，避免 DDNS 轮换 IP 池中被封锁的死 IP 导致整节点失败
 - **输出文件名**：自动从订阅 URL/文件/内容中提取订阅名称，作为输出文件前缀（如 `xx机场_20260724_105252_speed.png`），也可用 `-name` 手动指定
 - **随机主题**：以 16 款柔和浅色主题为主（带 subtle 背景花纹），另有 4 款深色精选与 `default`，每次运行随机一套；也可通过 `-theme` 指定
@@ -206,7 +207,7 @@ internal/
 
 ### mihomo（GPL-3.0）
 
-- 版本：`github.com/metacubex/mihomo v1.19.29`
+- 版本：`github.com/metacubex/mihomo v1.19.33`
 - 用途：`internal/nodepool` 通过 `adapter.ParseProxy` 解析节点配置并作拨号层，支持 mihomo 全部代理协议（anytls 等）
 - 合规：mihomo 以 GPL-3.0 授权，本项目静态链接并整体以 GPL-3.0 开源，即满足 GPL-3.0 的分发义务。分发二进制（CLI / WebUI / Android APK）时请一并提供本仓库源码。
 

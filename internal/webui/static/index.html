@@ -3,208 +3,2156 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NekoSpeed 机场测速</title>
+<title>NekoSpeed · 机场测速与解锁分析控制台</title>
 <style>
+  :root {
+    --bg: #f1f5f9;
+    --bg-accent: radial-gradient(1200px 500px at 15% -10%, rgba(59,130,246,0.10), transparent 60%),
+                 radial-gradient(1000px 450px at 85% -15%, rgba(236,72,153,0.07), transparent 60%);
+    --card-bg: #ffffff;
+    --card-sub: #f8fafc;
+    --border: #e2e8f0;
+    --border-focus: #3b82f6;
+    --text: #0f172a;
+    --text-secondary: #475569;
+    --muted: #64748b;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --primary-soft: rgba(37,99,235,0.10);
+    --success: #10b981;
+    --success-soft: rgba(16,185,129,0.12);
+    --warning: #f59e0b;
+    --warning-soft: rgba(245,158,11,0.14);
+    --danger: #ef4444;
+    --danger-hover: #dc2626;
+    --danger-soft: rgba(239,68,68,0.12);
+    --shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.05), 0 2px 6px -1px rgba(15, 23, 42, 0.03);
+    --input-bg: #ffffff;
+    --table-hover: #f1f5f9;
+    --terminal-bg: #0f172a;
+    --terminal-text: #e2e8f0;
+  }
+
+  [data-theme="dark"] {
+    --bg: #0b1120;
+    --bg-accent: radial-gradient(1200px 500px at 15% -10%, rgba(59,130,246,0.15), transparent 60%),
+                 radial-gradient(1000px 450px at 85% -15%, rgba(236,72,153,0.10), transparent 60%);
+    --card-bg: #111827;
+    --card-sub: #1e293b;
+    --border: #1f2937;
+    --border-focus: #60a5fa;
+    --text: #f8fafc;
+    --text-secondary: #cbd5e1;
+    --muted: #94a3b8;
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --primary-soft: rgba(59,130,246,0.18);
+    --success: #34d399;
+    --success-soft: rgba(52,211,153,0.16);
+    --warning: #fbbf24;
+    --warning-soft: rgba(251,191,36,0.16);
+    --danger: #f87171;
+    --danger-hover: #ef4444;
+    --danger-soft: rgba(248,113,113,0.16);
+    --shadow: 0 8px 28px -4px rgba(0, 0, 0, 0.45);
+    --input-bg: #0f172a;
+    --table-hover: #1e293b;
+    --terminal-bg: #090d16;
+    --terminal-text: #cbd5e1;
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-    background: #f5f7fa;
-    color: #333; line-height: 1.6;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    background-color: var(--bg);
+    background-image: var(--bg-accent);
+    background-attachment: fixed;
+    color: var(--text);
+    line-height: 1.5;
     min-height: 100vh;
+    transition: background-color .2s, color .2s;
   }
-  .container { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  h1 .tag { font-size: 13px; color: #888; font-weight: normal; margin-left: 8px; }
+
+  .container { max-width: 1260px; margin: 0 auto; padding: 18px 18px 68px; }
+
+  /* Topbar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand-logo {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, #2563eb 0%, #ec4899 100%);
+    color: #fff; font-weight: 800; font-size: 19px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 12px rgba(37,99,235,0.28);
+  }
+  .brand h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; }
+  .brand .subtitle { font-size: 12px; color: var(--muted); }
+  .topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  .net-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--success-soft); color: var(--success); border: 1px solid rgba(16,185,129,0.25);
+  }
+  .net-pill.tun-warn {
+    background: var(--primary-soft); color: var(--primary); border-color: rgba(37,99,235,0.28);
+  }
+
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--card-bg); border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .status-pill.running .status-dot {
+    background: var(--primary);
+    box-shadow: 0 0 0 4px var(--primary-soft);
+    animation: pulse 1.4s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Cards */
   .card {
-    background: rgba(255,255,255,0.92); border: 1px solid rgba(229,233,240,0.8); border-radius: 10px;
-    padding: 20px; margin-top: 16px; box-shadow: 0 4px 12px rgba(0,0,0,.06);
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px 18px; margin-bottom: 14px; box-shadow: var(--shadow);
   }
-  label.field { display: block; margin-bottom: 12px; font-size: 14px; color: #555; }
-  label.field span { display: block; margin-bottom: 4px; font-weight: 600; }
-  input[type=text], input[type=number] {
-    width: 100%; padding: 8px 10px; border: 1px solid #d0d5dd; border-radius: 6px;
-    font-size: 14px; background: #fff;
+  .card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
   }
-  input:focus { outline: none; border-color: #4f8cff; }
-  .row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .row label.field { flex: 1; min-width: 110px; }
-  .checks { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; font-size: 14px; }
-  .checks label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-  button {
-    background: #4f8cff; color: #fff; border: none; border-radius: 6px;
-    padding: 10px 28px; font-size: 15px; cursor: pointer;
+  .card-title {
+    font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px;
   }
-  button:disabled { background: #a9c4f5; cursor: not-allowed; }
+  .badge {
+    font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--primary-soft); color: var(--primary);
+  }
+
+  /* Slim Launch Bar (Row 1 + Row 2) */
+  .launch-row-1 {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) 190px auto;
+    gap: 10px;
+    align-items: end;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 960px) {
+    .launch-row-1 { grid-template-columns: 1fr; }
+  }
+  .source-input-wrap {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .source-input-wrap input[type=text] { flex: 1; }
+
+  .launch-actions {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+
+  .launch-row-2 {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    padding: 9px 12px; border-radius: 10px;
+    background: var(--card-sub); border: 1px solid var(--border);
+  }
+  .module-bar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .inline-params {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .mini-field {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+  }
+  .mini-field input[type=number] {
+    width: 60px; padding: 5px 7px; font-size: 13px; text-align: center;
+  }
+
+  label.field { display: block; font-size: 12.5px; color: var(--text-secondary); }
+  label.field > span {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 4px; font-weight: 600;
+  }
+  label.field > span small { font-weight: 400; color: var(--muted); font-size: 11px; }
+
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; padding: 7.5px 10px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; background: var(--input-bg); color: var(--text);
+    transition: border-color .15s, box-shadow .15s;
+    font-family: inherit;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+
+  /* Pill Checkboxes */
+  .pill-group-label { font-size: 12.5px; font-weight: 700; color: var(--text-secondary); margin-right: 2px; }
+  label.pill-check {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 10px; border-radius: 7px; font-size: 12.5px; font-weight: 500;
+    border: 1px solid var(--border); background: var(--card-bg); color: var(--text-secondary);
+    cursor: pointer; user-select: none; transition: all .15s;
+  }
+  label.pill-check:hover { border-color: var(--primary); }
+  label.pill-check input { accent-color: var(--primary); width: 13px; height: 13px; cursor: pointer; }
+  label.pill-check:has(input:checked) {
+    border-color: var(--primary); background: var(--primary-soft); color: var(--primary); font-weight: 600;
+  }
+
+  .preset-divider { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+  .chip-btn {
+    background: var(--card-bg); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 3.5px 8px; font-size: 11.5px; cursor: pointer; transition: all .15s;
+  }
+  .chip-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+  /* Buttons */
+  button.btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    background: var(--primary); color: #fff; border: none; border-radius: 8px;
+    padding: 8px 18px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+    transition: background .15s, transform .08s, opacity .15s;
+    white-space: nowrap;
+  }
+  button.btn:hover:not(:disabled) { background: var(--primary-hover); }
+  button.btn:active:not(:disabled) { transform: translateY(1px); }
+  button.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  button.btn-danger { background: var(--danger); }
+  button.btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+  button.btn-secondary {
+    background: var(--card-sub); color: var(--text-secondary);
+    border: 1px solid var(--border); padding: 7.5px 12px; font-size: 12.5px;
+  }
+  button.btn-secondary:hover:not(:disabled) {
+    background: var(--border); color: var(--text);
+  }
+  button.btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+
+  /* Collapsible Drawers */
+  .drawer-box {
+    margin-top: 10px; padding: 12px 14px; border-radius: 10px;
+    background: var(--card-sub); border: 1px solid var(--border);
+  }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+  @media (max-width: 900px) {
+    .grid-4, .grid-3 { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 560px) {
+    .grid-4, .grid-3 { grid-template-columns: 1fr; }
+  }
+
+  .switches-row {
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    font-size: 12.5px; color: var(--text-secondary); padding-top: 4px;
+  }
+  .switches-left { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  .switches-left label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .switches-left input[type=checkbox] { accent-color: var(--primary); width: 14px; height: 14px; cursor: pointer; }
+
+  /* Node Picker Drawer */
+  .picker-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .picker-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+    gap: 7px; max-height: 260px; overflow-y: auto; padding-right: 4px;
+  }
+  label.picker-item {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 9px; border-radius: 7px; font-size: 12.5px;
+    background: var(--card-bg); border: 1px solid var(--border);
+    cursor: pointer; user-select: none; transition: border-color .12s;
+  }
+  label.picker-item:hover { border-color: var(--primary); }
+  label.picker-item:has(input:checked) {
+    border-color: var(--primary); background: var(--primary-soft);
+  }
+  label.picker-item input { accent-color: var(--primary); flex-shrink: 0; }
+  .picker-flag {
+    font-size: 10.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+    background: var(--border); color: var(--text-secondary); flex-shrink: 0;
+  }
+  .picker-name {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
+  }
+  .picker-proto {
+    font-size: 10.5px; color: var(--muted); text-transform: uppercase; flex-shrink: 0;
+  }
+
+  /* Compact Run Monitor (Progress + Collapsible Log) */
+  .monitor-card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 14px; box-shadow: var(--shadow);
+  }
+  .progress-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12.5px; margin-bottom: 6px; gap: 8px; flex-wrap: wrap;
+  }
+  .progress-stage { font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .progress-right { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .progress-track {
+    width: 100%; height: 8px; background: var(--border); border-radius: 999px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #2563eb 0%, #06b6d4 50%, #10b981 100%);
+    border-radius: 999px; transition: width .25s ease;
+  }
+  details.log-drawer { margin-top: 8px; }
+  details.log-drawer summary {
+    font-size: 12px; font-weight: 600; color: var(--text-secondary);
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 0;
+  }
+  details.log-drawer summary::-webkit-details-marker { display: none; }
   #log {
-    background: #1e2430; color: #c9e1ff; border-radius: 8px; padding: 12px 14px;
-    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
-    height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    margin-top: 6px;
+    background: var(--terminal-bg); color: var(--terminal-text);
+    border-radius: 8px; padding: 10px 12px;
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
+    height: 175px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    border: 1px solid var(--border);
   }
-  #log:empty::before { content: "等待任务开始…"; color: #5a6678; }
-  #summary { font-size: 15px; margin-bottom: 12px; }
-  #summary .ok { color: #1a9e54; font-weight: 600; }
-  #summary .fail { color: #d64545; font-weight: 600; }
-  .thumbs { display: flex; gap: 12px; flex-wrap: wrap; }
-  .thumbs a { display: block; }
-  .thumbs img {
-    width: 220px; border: 1px solid #e0e4ea; border-radius: 8px; background: #fff;
-    cursor: zoom-in; transition: transform .15s;
+  .log-line { padding: 1px 0; }
+  .log-line.info { color: #38bdf8; }
+  .log-line.warn { color: #fbbf24; }
+  .log-line.err { color: #f87171; font-weight: 600; }
+  .log-line.ok { color: #34d399; font-weight: 600; }
+  .log-line.node { color: #cbd5e1; }
+
+  /* Stat cards */
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px;
   }
-  .thumbs img:hover { transform: scale(1.03); }
-  .json-link { display: inline-block; margin-top: 12px; font-size: 14px; }
+  @media (max-width: 860px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
+  .stat-card {
+    padding: 12px 14px; border-radius: 10px;
+    background: var(--card-sub); border: 1px solid var(--border);
+  }
+  .stat-label { font-size: 11.5px; color: var(--muted); font-weight: 600; margin-bottom: 3px; }
+  .stat-value { font-size: 19px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+  .stat-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+
+  /* Result Header & History Toolbar */
+  .history-toolbar {
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  .history-toolbar select { min-width: 260px; max-width: 380px; padding: 6px 10px; font-size: 12.5px; }
+
+  /* Result Tabs */
+  .tabs-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; border-bottom: 1px solid var(--border);
+    padding-bottom: 10px; margin-bottom: 14px;
+  }
+  .tab-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tab-btn {
+    background: var(--card-sub); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6.5px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: all .15s;
+  }
+  .tab-btn.active {
+    background: var(--primary); color: #fff; border-color: var(--primary);
+  }
+
+  /* Instant Re-render Toolbar in Gallery */
+  .rerender-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+    padding: 9px 12px; border-radius: 10px;
+    background: var(--card-sub); border: 1px solid var(--border);
+  }
+  .rerender-controls {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1;
+  }
+  .rerender-controls select, .rerender-controls input[type=text] {
+    width: auto; min-width: 135px; padding: 5.5px 9px; font-size: 12.5px;
+  }
+
+  /* Image Gallery */
+  .gallery-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px;
+  }
+  .img-card {
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    background: var(--card-sub); display: flex; flex-direction: column;
+  }
+  .img-card-head {
+    padding: 9px 13px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 600;
+  }
+  .img-card-body {
+    padding: 10px; background: var(--card-bg); flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    max-height: 360px; overflow: hidden; position: relative; cursor: zoom-in;
+  }
+  .img-card-body img {
+    max-width: 100%; max-height: 340px; object-fit: contain; border-radius: 6px;
+    transition: transform .2s ease;
+  }
+  .img-card-body:hover img { transform: scale(1.015); }
+  .img-card-actions {
+    padding: 8px 13px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; justify-content: flex-end; background: var(--card-sub);
+  }
+  a.btn-link {
+    text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
+    padding: 5px 10px; font-size: 12px; font-weight: 600; border-radius: 6px;
+    background: var(--card-bg); color: var(--text-secondary); border: 1px solid var(--border);
+  }
+  a.btn-link:hover { border-color: var(--primary); color: var(--primary); }
+
+  /* Interactive Node Data Table */
+  .table-toolbar {
+    display: flex; gap: 10px; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .table-toolbar input[type=text] { max-width: 360px; }
+  .table-wrap {
+    width: 100%; max-width: 100%; min-width: 0; overflow-x: auto;
+    border: 1px solid var(--border); border-radius: 10px;
+    max-height: 620px; overflow-y: auto;
+  }
+  .topo-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+    gap: 14px;
+    width: 100%;
+  }
+  .topo-grid > div { min-width: 0; max-width: 100%; }
+  @media (max-width: 1080px) {
+    .topo-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+  table.data-table td.topo-wrap {
+    white-space: normal;
+    word-break: break-word;
+    min-width: 110px;
+  }
+  table.data-table {
+    width: 100%; border-collapse: collapse; font-size: 12.5px; text-align: left;
+  }
+  table.data-table th, table.data-table td {
+    padding: 8px 11px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  table.data-table th {
+    background: var(--card-sub); color: var(--text-secondary); font-weight: 700;
+    cursor: pointer; user-select: none; position: sticky; top: 0; z-index: 2;
+  }
+  table.data-table th:hover { color: var(--primary); }
+  table.data-table tr:hover td { background: var(--table-hover); }
+  table.data-table td.wrap-cell { white-space: normal; min-width: 175px; max-width: 280px; }
+
+  .pill {
+    display: inline-block; padding: 1.5px 6.5px; border-radius: 5px;
+    font-size: 11px; font-weight: 600; margin: 1px 2px;
+  }
+  .pill-ok { background: var(--success-soft); color: var(--success); }
+  .pill-warn { background: var(--warning-soft); color: var(--warning); }
+  .pill-fail { background: var(--danger-soft); color: var(--danger); }
+  .pill-muted { background: var(--border); color: var(--muted); }
+  .ip-copy {
+    cursor: pointer; font-family: "JetBrains Mono", Consolas, monospace;
+    border-bottom: 1px dashed var(--muted);
+  }
+  .ip-copy:hover { color: var(--primary); border-bottom-color: var(--primary); }
+
+  /* Lightbox */
   #lightbox {
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.82);
-    z-index: 10; cursor: zoom-out; text-align: center; overflow: auto;
+    display: none; position: fixed; inset: 0; background: rgba(6, 10, 18, 0.90);
+    z-index: 100; flex-direction: column; user-select: none;
   }
-  #lightbox img { max-width: 96%; margin: 2% auto; border-radius: 6px; }
-  .hidden { display: none; }
+  #lightbox.open { display: flex; }
+  .lb-toolbar {
+    padding: 11px 18px; display: flex; align-items: center; justify-content: space-between;
+    background: rgba(15, 23, 42, 0.88); color: #f8fafc; border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .lb-title { font-size: 13.5px; font-weight: 600; }
+  .lb-controls { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+  .lb-stage {
+    flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: center;
+    padding: 22px; cursor: zoom-out;
+  }
+  .lb-stage img {
+    max-width: 96%; border-radius: 6px; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    transform-origin: top center; transition: width .15s ease;
+  }
+
+  /* Toast Notifications */
+  #toastContainer {
+    position: fixed; top: 18px; right: 18px; z-index: 200;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto;
+    padding: 10px 15px; border-radius: 10px; font-size: 13px; font-weight: 600;
+    background: var(--card-bg); color: var(--text);
+    border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+    display: flex; align-items: center; gap: 8px;
+    animation: toastIn .2s ease;
+  }
+  .toast.ok { border-left: 4px solid var(--success); }
+  .toast.err { border-left: 4px solid var(--danger); }
+  .toast.warn { border-left: 4px solid var(--warning); }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
+<div id="toastContainer"></div>
+
 <div class="container">
-  <h1>NekoSpeed<span class="tag">机场测速 · 内嵌 Web UI</span></h1>
+  <!-- 顶部导航栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">N</div>
+      <div>
+        <h1>NekoSpeed</h1>
+        <div class="subtitle">机场全维测速 · 流媒体 / AI 解锁 · 出入口拓扑分析控制台 (mihomo 内核)</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="net-pill hidden" id="netEnvBadge" title="测速底层连接已直接绑定物理网卡，即使本机开启 Clash TUN 也不会形成代理套代理">
+        <span>🛡️</span>
+        <span id="netEnvText">物理网卡直连</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="toggleLogCardBtn" type="button" title="显示或隐藏运行监控与终端日志">🖥️ 运行日志</button>
+      <div class="status-pill" id="statusPill">
+        <span class="status-dot"></span>
+        <span id="statusText">就绪</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="themeToggleBtn" type="button" title="切换深色/浅色界面">🌙 深色</button>
+    </div>
+  </header>
 
-  <div class="card">
-    <label class="field">
-      <span>订阅链接 / 本地文件路径</span>
-      <input type="text" id="source" placeholder="https://example.com/sub 或 testdata/clash.yaml">
-    </label>
-    <div class="checks" id="tests">
-      <label><input type="checkbox" value="speed" checked> 测速</label>
-      <label><input type="checkbox" value="media" checked> 流媒体</label>
-      <label><input type="checkbox" value="ai" checked> AI 解锁</label>
-      <label><input type="checkbox" value="topo" checked> 线路分析</label>
-      <label><input type="checkbox" value="nat"> NAT 类型</label>
+  <!-- 极简双行启动台卡片 -->
+  <section class="card" id="launchCard">
+    <!-- 第一行：智能订阅输入 + 订阅名称 + 挑节点 + 开始测试 -->
+    <div class="launch-row-1">
+      <label class="field">
+        <span>
+          <span>订阅链接 / 本地配置路径 <small id="uploadStateHint">支持 URL、本地路径或拖拽/上传配置文件</small></span>
+          <small style="color:var(--primary); cursor:pointer;" id="pasteToggleBtn">📋 粘贴节点文本/YAML</small>
+        </span>
+        <div class="source-input-wrap">
+          <input type="text" id="source" list="recentSubList" placeholder="https://example.com/sub 或 E:\path\to\clash.yaml（可拖拽文件至此）">
+          <datalist id="recentSubList"></datalist>
+          <input type="file" id="fileUploadInput" accept=".yaml,.yml,.txt,.conf" class="hidden">
+          <button type="button" class="btn btn-secondary" id="uploadFileBtn" title="选择本地 Clash YAML 或 Base64 订阅文件">📁 上传</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span>自定义名称 <small>可选，作标题前缀</small></span>
+        <input type="text" id="subName" placeholder="留空自动识别机场名">
+      </label>
+
+      <div class="launch-actions">
+        <button type="button" class="btn btn-secondary" id="previewNodesBtn" title="预先解析订阅并手动勾选要测试的节点">🔍 挑节点</button>
+        <button type="button" class="btn" id="runBtn" title="快捷键 Ctrl + Enter">▶ 开始测试</button>
+        <button type="button" class="btn btn-danger hidden" id="cancelBtn">⏹ 停止</button>
+      </div>
     </div>
-    <div class="row">
-      <label class="field"><span>线程数</span><input type="number" id="threads" value="8" min="1" max="32"></label>
-      <label class="field"><span>时长(秒)</span><input type="number" id="duration" value="10" min="1" max="30"></label>
-      <label class="field"><span>并发节点数</span><input type="number" id="concurrency" value="8" min="1"></label>
-      <label class="field"><span>延迟次数</span><input type="number" id="pingCount" value="4" min="1"></label>
+
+    <!-- 可选：直接粘贴分享链接或 YAML 内容抽屉 -->
+    <div class="drawer-box hidden" id="pasteDrawer" style="margin-bottom:12px; margin-top:0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <span style="font-size:12.5px; font-weight:700; color:var(--text-secondary);">📋 直接粘贴节点分享链接 (vless://, ss://, trojan://, hysteria2://) 或完整 Clash YAML 内容</span>
+        <button type="button" class="chip-btn" id="clearPasteBtn">清空粘贴内容</button>
+      </div>
+      <textarea id="pastedContent" rows="4" placeholder="在此粘贴多行节点链接或 Clash YAML 配置文本…"></textarea>
     </div>
-    <div class="checks">
-      <label><input type="checkbox" id="single"> 单线程测速</label>
+
+    <!-- 第二行：测试模块药丸 + 核心三参数 + 高级参数折叠按钮 -->
+    <div class="launch-row-2">
+      <div class="module-bar" id="tests">
+        <span class="pill-group-label">模块：</span>
+        <label class="pill-check"><input type="checkbox" value="speed" checked> ⚡ 测速</label>
+        <label class="pill-check"><input type="checkbox" value="media" checked> 🎬 流媒体</label>
+        <label class="pill-check"><input type="checkbox" value="ai" checked> 🤖 AI 解锁</label>
+        <label class="pill-check"><input type="checkbox" value="topo" checked> 🌐 拓扑</label>
+        <label class="pill-check"><input type="checkbox" value="nat"> 🛡️ NAT</label>
+        <span class="preset-divider"></span>
+        <button type="button" class="chip-btn" data-preset="default">常规四项</button>
+        <button type="button" class="chip-btn" data-preset="all">全选</button>
+        <button type="button" class="chip-btn" data-preset="nodl">仅解锁(省流)</button>
+        <button type="button" class="chip-btn" data-preset="speed">仅测速</button>
+      </div>
+
+      <div class="inline-params">
+        <label class="mini-field" title="下载测速并发线程数（设为 1 即为单线程模式）">
+          <span>线程</span>
+          <input type="number" id="threads" value="8" min="1" max="32">
+        </label>
+        <label class="mini-field" title="单节点下载测速持续秒数">
+          <span>时长(s)</span>
+          <input type="number" id="duration" value="10" min="1" max="30">
+        </label>
+        <label class="mini-field" title="同时进行延迟/解锁/拓扑探测的节点并发数（下载测速内部自动独占串行）">
+          <span>并发</span>
+          <input type="number" id="concurrency" value="6" min="1" max="32">
+        </label>
+        <button type="button" class="btn btn-secondary btn-sm" id="toggleAdvBtn">⚙️ 过滤与高级参数 ▾</button>
+      </div>
     </div>
-    <label class="field">
-      <span>节点过滤正则（可选）</span>
-      <input type="text" id="filter" placeholder="如：香港|日本">
-    </label>
-    <label class="field">
-      <span>订阅拉取代理（可选，订阅被墙时填写）</span>
-      <input type="text" id="proxy" placeholder="如：http://127.0.0.1:7890 或 socks5://127.0.0.1:1080">
-    </label>
-    <button id="runBtn">开始测试</button>
+
+    <!-- 折叠抽屉 1：过滤与高级参数 -->
+    <div class="drawer-box hidden" id="advDrawer">
+      <div class="grid-4">
+        <label class="field">
+          <span>包含节点正则 <small>白名单</small></span>
+          <input type="text" id="filter" placeholder="如：香港|日本|新加坡">
+        </label>
+        <label class="field">
+          <span>排除节点正则 <small>黑名单</small></span>
+          <input type="text" id="exclude" placeholder="如：倍率|游戏|实验|IPLC">
+        </label>
+        <label class="field">
+          <span>订阅拉取代理 <small>仅拉取订阅用</small></span>
+          <input type="text" id="proxy" placeholder="如：http://127.0.0.1:7890">
+        </label>
+        <label class="field" title="单节点下载达到指定 MB 后立即停止，防止按量订阅耗尽流量（0=不限制）">
+          <span>单节点流量上限 <small>MB (0=不限)</small></span>
+          <input type="number" id="maxMB" value="0" min="0">
+        </label>
+      </div>
+      <div class="grid-3">
+        <label class="field">
+          <span>延迟测试次数 <small>每次 Ping</small></span>
+          <input type="number" id="pingCount" value="4" min="1" max="20">
+        </label>
+        <label class="field">
+          <span>自定义下载测速文件 URL <small>留空默认 Cloudflare/Google</small></span>
+          <input type="text" id="speedURL" placeholder="https://speed.cloudflare.com/__down?bytes=104857600">
+        </label>
+        <label class="field">
+          <span>自定义延迟探测 URL <small>默认 gstatic 204</small></span>
+          <input type="text" id="pingURL" placeholder="http://www.gstatic.com/generate_204">
+        </label>
+      </div>
+      <div class="switches-row">
+        <div class="switches-left">
+          <label><input type="checkbox" id="skipInfo" checked> 自动跳过「剩余流量/到期/官网」等非代理提示节点</label>
+          <label><input type="checkbox" id="preflight" checked> 启用服务器域名多 DNS 采样与活 IP 预检</label>
+        </div>
+        <button id="resetPrefsBtn" class="btn btn-secondary btn-sm" type="button">↺ 恢复默认参数</button>
+      </div>
+    </div>
+
+    <!-- 折叠抽屉 2：按需节点预览与勾选器 -->
+    <div class="drawer-box hidden" id="nodePickerDrawer">
+      <div class="picker-header">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:13px; font-weight:700;" id="pickerSummaryTitle">📋 节点列表预览</span>
+          <span class="badge" id="pickerCountBadge">0 / 0 已选</span>
+          <input type="text" id="pickerSearch" placeholder="🔍 筛选节点名称/协议/国家码…" style="width:210px; padding:4px 8px; font-size:12px;">
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button type="button" class="chip-btn" id="pickerSelectMatchedBtn">仅选有效节点</button>
+          <button type="button" class="chip-btn" id="pickerSelectAllBtn">全选当前筛选</button>
+          <button type="button" class="chip-btn" id="pickerInvertBtn">反选</button>
+          <button type="button" class="chip-btn" id="pickerClearBtn">清空</button>
+          <button type="button" class="chip-btn" id="pickerCloseBtn">✕ 收起</button>
+        </div>
+      </div>
+      <div class="picker-grid" id="pickerGrid"></div>
+    </div>
+  </section>
+
+  <!-- 紧凑型运行监控条 + 可折叠终端日志（默认空闲隐藏，运行或手动点开时显示） -->
+  <section class="monitor-card hidden" id="runMonitor">
+    <div class="progress-meta">
+      <span class="progress-stage">
+        <span id="progressStage">正在准备测试任务…</span>
+      </span>
+      <span class="progress-right" id="progressRight">0 / 0 (0%) · 已用时 00:00</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <details class="log-drawer" id="logDrawer">
+      <summary>
+        <span>🖥️ 实时终端日志 (<span id="logCountBadge">0</span> 行) · 点击展开/收起</span>
+        <span style="display:flex; gap:8px; align-items:center;" onclick="event.stopPropagation();">
+          <label style="display:inline-flex; align-items:center; gap:4px; font-weight:500; cursor:pointer;">
+            <input type="checkbox" id="autoScroll" checked style="accent-color:var(--primary);"> 自动滚动
+          </label>
+          <button class="chip-btn" id="copyLogBtn" type="button">📋 复制</button>
+          <button class="chip-btn" id="clearLogBtn" type="button">🧹 清空</button>
+        </span>
+      </summary>
+      <div id="log"></div>
+    </details>
+  </section>
+
+  <!-- 测速结果中心（启动时自动加载最近一次历史报告，测试中实时流式刷新） -->
+  <section class="card hidden" id="resultCard">
+    <div class="card-header">
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <div class="card-title">
+          <span>📈 测速结果报告</span>
+          <span class="badge" id="resultBadge">最新结果</span>
+        </div>
+        <div id="summary" style="font-size:13px; font-weight:600;"></div>
+      </div>
+
+      <!-- 历史记录选择器直接内嵌在结果报告卡片右上角 -->
+      <div class="history-toolbar">
+        <select id="historySelect" title="切换查看过往测速记录">
+          <option value="">📂 历史测速记录…</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" id="refreshHistoryBtn" type="button" title="刷新历史列表">🔄</button>
+        <button class="btn btn-secondary btn-sm hidden" id="deleteHistoryBtn" type="button" style="color:var(--danger);" title="删除当前选中的历史记录">🗑️ 删除</button>
+      </div>
+    </div>
+
+    <!-- 4 个核心指标概览卡片 -->
+    <div class="stat-grid hidden" id="statGrid">
+      <div class="stat-card">
+        <div class="stat-label">可用节点 / 总节点</div>
+        <div class="stat-value" id="statNodes">-</div>
+        <div class="stat-sub" id="statNodesSub">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">最高峰值速度 / 全场均速</div>
+        <div class="stat-value" id="statSpeed">-</div>
+        <div class="stat-sub" id="statSpeedSub">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">最低延迟 / 平均 HTTPS 延迟</div>
+        <div class="stat-value" id="statLatency">-</div>
+        <div class="stat-sub" id="statLatencySub">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">线路拓扑与本场测速流量</div>
+        <div class="stat-value" id="statTopo">-</div>
+        <div class="stat-sub" id="statTopoSub">-</div>
+      </div>
+    </div>
+
+    <!-- 视图切换标签栏 -->
+    <div class="tabs-bar">
+      <div class="tab-btns">
+        <button type="button" class="tab-btn active" data-tab="gallery" id="tabBtnGallery">🖼️ 结果图片画廊 (PNG)</button>
+        <button type="button" class="tab-btn" data-tab="nodes" id="tabBtnNodes">📊 交互式节点明细表</button>
+        <button type="button" class="tab-btn" data-tab="topo" id="tabBtnTopo">🌐 出入口 IP 拓扑明细</button>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button type="button" class="btn btn-secondary btn-sm" id="exportCsvBtn">⬇ 导出 CSV 表格</button>
+        <a class="btn-link hidden" id="jsonLink" download>⬇ 下载 JSON</a>
+      </div>
+    </div>
+
+    <!-- Tab 1: PNG 画廊 + 免重测秒级重绘工具栏 -->
+    <div id="tabGallery">
+      <div class="rerender-bar">
+        <div class="rerender-controls">
+          <span style="font-size:12.5px; font-weight:700; color:var(--text-secondary);">🎨 图片样式与免重测重绘：</span>
+          <select id="sortBy" title="结果图节点排序方式">
+            <option value="">排序：按订阅原序</option>
+            <option value="speed">排序：按平均速度降序</option>
+            <option value="latency">排序：按 HTTPS 延迟升序</option>
+          </select>
+          <select id="themeSelect" title="结果图配色主题">
+            <option value="default">主题：🌸 经典浅粉 (default)</option>
+            <option value="sky_light">主题：🩵 晴空浅蓝 (sky_light)</option>
+            <option value="nord_dark">主题：🌙 极夜深蓝 (nord_dark)</option>
+            <option value="tokyo_dark">主题：🌆 东京暗夜 (tokyo_dark)</option>
+            <option value="forest_dark">主题：🌲 暗黑森林 (forest_dark)</option>
+            <option value="sunset_dark">主题：🌇 暮色深棕 (sunset_dark)</option>
+            <option value="">主题：🎲 随机配色</option>
+          </select>
+          <input type="text" id="watermark" placeholder="水印文字（留空无水印）" style="width:150px;">
+          <input type="text" id="bandwidth" placeholder="标题后缀/带宽（如 1Gbps 或 上海电信@1Gbps）" style="width:215px;">
+        </div>
+        <button type="button" class="btn btn-sm" id="rerenderBtn" title="无需重新消耗流量测速，直接基于当前 JSON 结果在 0.3 秒内重新生成所有 PNG 图片">✨ 免重测立即重绘</button>
+      </div>
+      <div class="gallery-grid" id="thumbs"></div>
+    </div>
+
+    <!-- Tab 2: 交互式节点表格 -->
+    <div id="tabNodes" class="hidden">
+      <div class="table-toolbar">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; flex:1;">
+          <input type="text" id="nodeSearch" placeholder="🔍 搜索节点名 / 协议 / IP / 国家码 / 解锁平台(如 netflix, chatgpt, US)…">
+          <select id="nodeStatusFilter" style="width:auto;">
+            <option value="all">全部状态</option>
+            <option value="ok">仅显示可用节点</option>
+            <option value="fail">仅显示失败节点</option>
+          </select>
+        </div>
+        <div style="font-size:12px; color:var(--muted);">点击任意表头升/降序排列 · 点击 IP 直接复制</div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="nodeTable">
+          <thead>
+            <tr>
+              <th data-sort="index"># ↕</th>
+              <th data-sort="name">节点名称 ↕</th>
+              <th data-sort="type">协议 ↕</th>
+              <th data-sort="tls">TLS RTT ↕</th>
+              <th data-sort="https">HTTPS 延迟 ↕</th>
+              <th data-sort="loss">丢包 ↕</th>
+              <th data-sort="avgSpeed">平均速度 ↕</th>
+              <th data-sort="maxSpeed">最高速度 ↕</th>
+              <th data-sort="inbound">入口 IP / 地区 ↕</th>
+              <th data-sort="outbound">落地出口 IP / 归属 ↕</th>
+              <th>流媒体解锁</th>
+              <th>AI 平台解锁</th>
+            </tr>
+          </thead>
+          <tbody id="nodeTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Tab 3: 出入口拓扑明细 -->
+    <div id="tabTopo" class="hidden">
+      <div class="topo-grid">
+        <div>
+          <h3 style="font-size:13.5px; margin-bottom:8px;">📥 入口服务器 IP 汇总（点击 IP 复制）</h3>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>入口#</th>
+                  <th>入口 IP</th>
+                  <th>地区</th>
+                  <th>ASN / 组织</th>
+                  <th>栈</th>
+                  <th>关联节点数</th>
+                </tr>
+              </thead>
+              <tbody id="inboundTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3 style="font-size:13.5px; margin-bottom:8px;">📤 出口落地 IP 明细（点击 IP 复制）</h3>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>所属入口</th>
+                  <th>落地 IP</th>
+                  <th>地区</th>
+                  <th>ASN / 组织</th>
+                  <th>节点名称</th>
+                </tr>
+              </thead>
+              <tbody id="outboundTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- 全屏图片预览 Lightbox -->
+<div id="lightbox">
+  <div class="lb-toolbar">
+    <div class="lb-title" id="lbTitle">图片预览</div>
+    <div class="lb-controls">
+      <button type="button" class="btn btn-secondary btn-sm" id="lbPrevBtn">◀ 上一张</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="lbNextBtn">下一张 ▶</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="lbZoomOutBtn">➖ 缩小</button>
+      <span id="lbZoomLabel" style="font-size:12px; min-width:44px; text-align:center;">100%</span>
+      <button type="button" class="btn btn-secondary btn-sm" id="lbZoomInBtn">➕ 放大</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="lbCopyBtn">📋 复制图片</button>
+      <a class="btn btn-sm" id="lbDownloadBtn" download style="text-decoration:none;">⬇ 下载原图</a>
+      <button type="button" class="btn btn-danger btn-sm" id="lbCloseBtn">✕ 关闭 (Esc)</button>
+    </div>
   </div>
-
-  <div class="card">
-    <div id="log"></div>
-  </div>
-
-  <div class="card hidden" id="resultCard">
-    <div id="summary"></div>
-    <div class="thumbs" id="thumbs"></div>
-    <a class="json-link hidden" id="jsonLink" download>⬇ 下载 JSON 结果</a>
+  <div class="lb-stage" id="lbStage">
+    <img id="lightboxImg" alt="">
   </div>
 </div>
 
-<div id="lightbox"><img id="lightboxImg" alt=""></div>
-
 <script>
 (function () {
+  var STORAGE_KEY = 'nekospeed_webui_prefs_v3';
+  var RECENT_SUBS_KEY = 'nekospeed_recent_subs_v1';
+  var THEME_KEY = 'nekospeed_ui_color_mode';
+
   var runBtn = document.getElementById('runBtn');
+  var cancelBtn = document.getElementById('cancelBtn');
+  var resetPrefsBtn = document.getElementById('resetPrefsBtn');
+  var statusPill = document.getElementById('statusPill');
+  var statusText = document.getElementById('statusText');
+  var themeToggleBtn = document.getElementById('themeToggleBtn');
+  var netEnvBadge = document.getElementById('netEnvBadge');
+  var netEnvText = document.getElementById('netEnvText');
+
+  var historySelect = document.getElementById('historySelect');
+  var refreshHistoryBtn = document.getElementById('refreshHistoryBtn');
+  var deleteHistoryBtn = document.getElementById('deleteHistoryBtn');
+
+  var runMonitor = document.getElementById('runMonitor');
+  var progressStage = document.getElementById('progressStage');
+  var progressRight = document.getElementById('progressRight');
+  var progressFill = document.getElementById('progressFill');
+  var logDrawer = document.getElementById('logDrawer');
+
   var log = document.getElementById('log');
+  var logCountBadge = document.getElementById('logCountBadge');
+  var autoScroll = document.getElementById('autoScroll');
+  var copyLogBtn = document.getElementById('copyLogBtn');
+  var clearLogBtn = document.getElementById('clearLogBtn');
+
   var resultCard = document.getElementById('resultCard');
+  var resultBadge = document.getElementById('resultBadge');
   var summary = document.getElementById('summary');
+  var statGrid = document.getElementById('statGrid');
   var thumbs = document.getElementById('thumbs');
   var jsonLink = document.getElementById('jsonLink');
-  var lightbox = document.getElementById('lightbox');
-  var lightboxImg = document.getElementById('lightboxImg');
 
-  function appendLog(line) {
-    log.textContent += line + "\n";
-    log.scrollTop = log.scrollHeight;
+  var historyMap = {};
+  var currentRunId = '';
+  var initialHistoryLoaded = false;
+
+  var logLineCount = 0;
+  var totalNodes = 0;
+  var completedNodes = 0;
+  var liveTrafficBytes = 0;
+  var taskStartMs = 0;
+  var elapsedTimer = null;
+
+  var currentReport = null;
+  var currentSortKey = 'index';
+  var currentSortAsc = true;
+
+  var galleryList = [];
+  var lbIndex = 0;
+  var lbZoom = 100;
+
+  // 上传/粘贴缓存状态
+  var uploadedFilename = '';
+  var previewNodesData = [];
+  var selectedIndicesSet = new Set();
+  var nodePickerActive = false;
+
+  // 0. Toast 轻提示
+  function showToast(msg, type) {
+    var box = document.getElementById('toastContainer');
+    var el = document.createElement('div');
+    el.className = 'toast ' + (type || 'ok');
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(function () {
+      el.style.opacity = '0';
+      el.style. transition = 'opacity .25s';
+      setTimeout(function () { el.remove(); }, 260);
+    }, 2800);
   }
 
-  function onDone(evt) {
-    runBtn.disabled = false;
-    runBtn.textContent = '开始测试';
-    resultCard.classList.remove('hidden');
-    thumbs.innerHTML = '';
-    jsonLink.classList.add('hidden');
-    if (!evt.ok) {
-      summary.innerHTML = '<span class="fail">任务失败：' + escapeHtml(evt.error || '未知错误') + '</span>';
+  // 1. UI 深浅色主题切换
+  function applyUITheme(mode) {
+    if (mode === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      themeToggleBtn.textContent = '☀️ 浅色';
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+      themeToggleBtn.textContent = '🌙 深色';
+    }
+  }
+  var savedMode = localStorage.getItem(THEME_KEY) ||
+    (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  applyUITheme(savedMode);
+  themeToggleBtn.addEventListener('click', function () {
+    var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    localStorage.setItem(THEME_KEY, next);
+    applyUITheme(next);
+  });
+
+  // 顶栏日志按钮与高级参数抽屉切换
+  document.getElementById('toggleLogCardBtn').addEventListener('click', function () {
+    runMonitor.classList.toggle('hidden');
+    if (!runMonitor.classList.contains('hidden')) {
+      logDrawer.open = true;
+    }
+  });
+  document.getElementById('toggleAdvBtn').addEventListener('click', function () {
+    var d = document.getElementById('advDrawer');
+    d.classList.toggle('hidden');
+    this.textContent = d.classList.contains('hidden') ? '⚙️ 过滤与高级参数 ▾' : '⚙️ 过滤与高级参数 ▴';
+  });
+
+  // 2. 智能订阅输入：最近订阅记忆 + 本地文件上传/拖拽 + 粘贴文本
+  function loadRecentSubs() {
+    try {
+      var list = JSON.parse(localStorage.getItem(RECENT_SUBS_KEY) || '[]');
+      var dl = document.getElementById('recentSubList');
+      dl.innerHTML = '';
+      list.forEach(function (item) {
+        var opt = document.createElement('option');
+        opt.value = item;
+        dl.appendChild(opt);
+      });
+    } catch (e) {}
+  }
+  function rememberSubSource(src) {
+    if (!src || /^out[\\/]uploads[\\/]/.test(src)) return;
+    try {
+      var list = JSON.parse(localStorage.getItem(RECENT_SUBS_KEY) || '[]');
+      list = [src].concat(list.filter(function (x) { return x !== src; })).slice(0, 8);
+      localStorage.setItem(RECENT_SUBS_KEY, JSON.stringify(list));
+      loadRecentSubs();
+    } catch (e) {}
+  }
+  loadRecentSubs();
+
+  var pasteDrawer = document.getElementById('pasteDrawer');
+  var pastedContent = document.getElementById('pastedContent');
+  var uploadStateHint = document.getElementById('uploadStateHint');
+
+  document.getElementById('pasteToggleBtn').addEventListener('click', function () {
+    pasteDrawer.classList.toggle('hidden');
+    if (!pasteDrawer.classList.contains('hidden')) {
+      pastedContent.focus();
+    }
+  });
+  document.getElementById('clearPasteBtn').addEventListener('click', function () {
+    pastedContent.value = '';
+    uploadedFilename = '';
+    uploadStateHint.textContent = '支持 URL、本地路径或拖拽/上传配置文件';
+    showToast('已清空粘贴/上传内容', 'ok');
+  });
+
+  function handleLocalFile(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function (ev) {
+      pastedContent.value = String(ev.target.result || '');
+      uploadedFilename = file.name;
+      var baseName = file.name.replace(/\.[^.]+$/, '');
+      if (!document.getElementById('subName').value.trim()) {
+        document.getElementById('subName').value = baseName;
+      }
+      document.getElementById('source').value = '[已加载本地文件] ' + file.name;
+      uploadStateHint.textContent = '已载入文件：' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)';
+      showToast('📁 已读取配置文件：' + file.name, 'ok');
+    };
+    reader.readAsText(file);
+  }
+
+  document.getElementById('uploadFileBtn').addEventListener('click', function () {
+    document.getElementById('fileUploadInput').click();
+  });
+  document.getElementById('fileUploadInput').addEventListener('change', function (e) {
+    if (e.target.files && e.target.files[0]) {
+      handleLocalFile(e.target.files[0]);
+    }
+  });
+
+  var launchCard = document.getElementById('launchCard');
+  launchCard.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    launchCard.style.borderColor = 'var(--primary)';
+  });
+  launchCard.addEventListener('dragleave', function () {
+    launchCard.style.borderColor = '';
+  });
+  launchCard.addEventListener('drop', function (e) {
+    e.preventDefault();
+    launchCard.style.borderColor = '';
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleLocalFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  // 当用户手动修改 source 输入框时，如果不再是 [已加载本地文件]，清除上传缓存并重置节点挑选
+  document.getElementById('source').addEventListener('input', function () {
+    if (this.value.indexOf('[已加载本地文件]') !== 0 && uploadedFilename) {
+      pastedContent.value = '';
+      uploadedFilename = '';
+      uploadStateHint.textContent = '支持 URL、本地路径或拖拽/上传配置文件';
+    }
+    resetNodePickerSelection();
+  });
+
+  // 3. 按需节点预览与勾选器 (POST /api/preview)
+  var previewNodesBtn = document.getElementById('previewNodesBtn');
+  var nodePickerDrawer = document.getElementById('nodePickerDrawer');
+  var pickerGrid = document.getElementById('pickerGrid');
+  var pickerCountBadge = document.getElementById('pickerCountBadge');
+
+  function resetNodePickerSelection() {
+    nodePickerActive = false;
+    selectedIndicesSet.clear();
+    previewNodesBtn.textContent = '🔍 挑节点';
+  }
+
+  function updatePickerSummary() {
+    var total = previewNodesData.length;
+    var selCount = selectedIndicesSet.size;
+    pickerCountBadge.textContent = selCount + ' / ' + total + ' 已选';
+    if (nodePickerActive && total > 0 && selCount < total) {
+      previewNodesBtn.textContent = '🔍 已挑 ' + selCount + '/' + total;
+    } else {
+      previewNodesBtn.textContent = '🔍 挑节点';
+    }
+  }
+
+  function renderPickerGrid() {
+    pickerGrid.innerHTML = '';
+    var q = (document.getElementById('pickerSearch').value || '').trim().toLowerCase();
+    previewNodesData.forEach(function (n) {
+      if (q) {
+        var hay = (n.name + ' ' + n.type + ' ' + n.flag + ' ' + n.server).toLowerCase();
+        if (hay.indexOf(q) < 0) return;
+      }
+      var checked = selectedIndicesSet.has(n.index);
+      var lbl = document.createElement('label');
+      lbl.className = 'picker-item';
+      lbl.title = n.name + ' (' + n.type + ' · ' + n.server + ')';
+      lbl.innerHTML =
+        '<input type="checkbox" data-idx="' + n.index + '"' + (checked ? ' checked' : '') + '>' +
+        '<span class="picker-flag">' + escapeHtml(n.flag || 'UN') + '</span>' +
+        '<span class="picker-name">' + escapeHtml(n.cleanName || n.name) + '</span>' +
+        (n.isInfo ? '<span class="pill pill-warn">提示</span>' : '<span class="picker-proto">' + escapeHtml(n.type) + '</span>');
+      var cb = lbl.querySelector('input');
+      cb.addEventListener('change', function () {
+        nodePickerActive = true;
+        if (cb.checked) selectedIndicesSet.add(n.index);
+        else selectedIndicesSet.delete(n.index);
+        updatePickerSummary();
+      });
+      pickerGrid.appendChild(lbl);
+    });
+    updatePickerSummary();
+  }
+
+  previewNodesBtn.addEventListener('click', function () {
+    var rawSource = document.getElementById('source').value.trim();
+    var inlineText = pastedContent.value.trim();
+    if (!rawSource && !inlineText) {
+      showToast('请先填写订阅链接或上传/粘贴节点配置', 'warn');
       return;
     }
-    summary.innerHTML = '完成：<span class="ok">成功 ' + evt.succeeded + '/' + evt.total +
-      '</span>，耗时 ' + evt.elapsed;
-    (evt.files || []).forEach(function (name) {
-      if (/_result\.json$/.test(name)) {
-        jsonLink.href = '/files/' + encodeURIComponent(name);
-        jsonLink.classList.remove('hidden');
-      } else if (/\.png$/.test(name)) {
-        var a = document.createElement('a');
-        var img = document.createElement('img');
-        img.src = '/files/' + encodeURIComponent(name);
-        img.alt = name;
-        img.title = name + '（点击放大）';
-        img.addEventListener('click', function () {
-          lightboxImg.src = img.src;
-          lightbox.style.display = 'block';
-        });
-        a.appendChild(img);
-        thumbs.appendChild(a);
+    var oldTxt = previewNodesBtn.textContent;
+    previewNodesBtn.disabled = true;
+    previewNodesBtn.textContent = '⏳ 解析中…';
+
+    fetch('/api/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: rawSource.indexOf('[已加载本地文件]') === 0 ? '' : rawSource,
+        content: inlineText,
+        filename: uploadedFilename,
+        filter: document.getElementById('filter').value.trim(),
+        exclude: document.getElementById('exclude').value.trim(),
+        skipInfo: document.getElementById('skipInfo').checked,
+        proxy: document.getElementById('proxy').value.trim()
+      })
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error(t); });
+      return resp.json();
+    }).then(function (data) {
+      previewNodesData = data.nodes || [];
+      selectedIndicesSet.clear();
+      previewNodesData.forEach(function (n) {
+        if (n.matched) selectedIndicesSet.add(n.index);
+      });
+      nodePickerActive = true;
+      if (data.subName && !document.getElementById('subName').value.trim()) {
+        document.getElementById('subName').value = data.subName;
       }
+      document.getElementById('pickerSummaryTitle').textContent =
+        '📋 节点预览 (' + (data.subName || '未命名订阅') + ')';
+      nodePickerDrawer.classList.remove('hidden');
+      renderPickerGrid();
+      showToast('✅ 成功解析 ' + previewNodesData.length + ' 个节点', 'ok');
+    }).catch(function (err) {
+      showToast('解析订阅失败：' + err.message, 'err');
+      previewNodesBtn.textContent = oldTxt;
+    }).finally(function () {
+      previewNodesBtn.disabled = false;
+      updatePickerSummary();
+    });
+  });
+
+  document.getElementById('pickerSearch').addEventListener('input', renderPickerGrid);
+  document.getElementById('pickerSelectMatchedBtn').addEventListener('click', function () {
+    selectedIndicesSet.clear();
+    previewNodesData.forEach(function (n) { if (n.matched) selectedIndicesSet.add(n.index); });
+    nodePickerActive = true;
+    renderPickerGrid();
+  });
+  document.getElementById('pickerSelectAllBtn').addEventListener('click', function () {
+    var q = (document.getElementById('pickerSearch').value || '').trim().toLowerCase();
+    previewNodesData.forEach(function (n) {
+      if (!q || (n.name + ' ' + n.type + ' ' + n.flag + ' ' + n.server).toLowerCase().indexOf(q) >= 0) {
+        selectedIndicesSet.add(n.index);
+      }
+    });
+    nodePickerActive = true;
+    renderPickerGrid();
+  });
+  document.getElementById('pickerInvertBtn').addEventListener('click', function () {
+    previewNodesData.forEach(function (n) {
+      if (selectedIndicesSet.has(n.index)) selectedIndicesSet.delete(n.index);
+      else selectedIndicesSet.add(n.index);
+    });
+    nodePickerActive = true;
+    renderPickerGrid();
+  });
+  document.getElementById('pickerClearBtn').addEventListener('click', function () {
+    selectedIndicesSet.clear();
+    nodePickerActive = true;
+    renderPickerGrid();
+  });
+  document.getElementById('pickerCloseBtn').addEventListener('click', function () {
+    nodePickerDrawer.classList.add('hidden');
+  });
+
+  // 4. 测试模块快捷预设
+  document.querySelectorAll('.chip-btn[data-preset]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var p = btn.getAttribute('data-preset');
+      var map = {
+        'default': ['speed', 'media', 'ai', 'topo'],
+        'all': ['speed', 'media', 'ai', 'topo', 'nat'],
+        'nodl': ['media', 'ai', 'topo'],
+        'speed': ['speed']
+      }[p] || [];
+      document.querySelectorAll('#tests input[type=checkbox]').forEach(function (cb) {
+        cb.checked = map.indexOf(cb.value) >= 0;
+      });
+    });
+  });
+
+  // 5. 参数持久化与恢复
+  function savePrefs() {
+    try {
+      var tests = [];
+      document.querySelectorAll('#tests input:checked').forEach(function (cb) { tests.push(cb.value); });
+      var srcVal = document.getElementById('source').value;
+      var prefs = {
+        source: srcVal.indexOf('[已加载本地文件]') === 0 ? '' : srcVal,
+        subName: document.getElementById('subName').value,
+        tests: tests,
+        threads: document.getElementById('threads').value,
+        duration: document.getElementById('duration').value,
+        concurrency: document.getElementById('concurrency').value,
+        pingCount: document.getElementById('pingCount').value,
+        maxMB: document.getElementById('maxMB').value,
+        sortBy: document.getElementById('sortBy').value,
+        skipInfo: document.getElementById('skipInfo').checked,
+        preflight: document.getElementById('preflight').checked,
+        filter: document.getElementById('filter').value,
+        exclude: document.getElementById('exclude').value,
+        proxy: document.getElementById('proxy').value,
+        theme: document.getElementById('themeSelect').value,
+        bandwidth: document.getElementById('bandwidth').value,
+        watermark: document.getElementById('watermark').value,
+        speedURL: document.getElementById('speedURL').value,
+        pingURL: document.getElementById('pingURL').value
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    } catch (e) {}
+  }
+
+  function loadPrefs() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('nekospeed_webui_prefs_v2');
+      if (!raw) return;
+      var prefs = JSON.parse(raw);
+      if (prefs.source) document.getElementById('source').value = prefs.source;
+      if (prefs.subName != null) document.getElementById('subName').value = prefs.subName;
+      if (Array.isArray(prefs.tests)) {
+        document.querySelectorAll('#tests input').forEach(function (cb) {
+          cb.checked = prefs.tests.indexOf(cb.value) >= 0;
+        });
+      }
+      if (prefs.threads != null) document.getElementById('threads').value = prefs.threads;
+      if (prefs.duration != null) document.getElementById('duration').value = prefs.duration;
+      if (prefs.concurrency != null) document.getElementById('concurrency').value = prefs.concurrency;
+      if (prefs.pingCount != null) document.getElementById('pingCount').value = prefs.pingCount;
+      if (prefs.maxMB != null) document.getElementById('maxMB').value = prefs.maxMB;
+      if (prefs.sortBy != null) document.getElementById('sortBy').value = prefs.sortBy;
+      if (typeof prefs.skipInfo === 'boolean') document.getElementById('skipInfo').checked = prefs.skipInfo;
+      if (typeof prefs.preflight === 'boolean') document.getElementById('preflight').checked = prefs.preflight;
+      if (prefs.filter != null) document.getElementById('filter').value = prefs.filter;
+      if (prefs.exclude != null) document.getElementById('exclude').value = prefs.exclude;
+      if (prefs.proxy != null) document.getElementById('proxy').value = prefs.proxy;
+      if (prefs.theme != null) document.getElementById('themeSelect').value = prefs.theme;
+      if (prefs.bandwidth != null) document.getElementById('bandwidth').value = prefs.bandwidth;
+      if (prefs.watermark != null) document.getElementById('watermark').value = prefs.watermark;
+      if (prefs.speedURL != null) document.getElementById('speedURL').value = prefs.speedURL;
+      if (prefs.pingURL != null) document.getElementById('pingURL').value = prefs.pingURL;
+    } catch (e) {}
+  }
+
+  resetPrefsBtn.addEventListener('click', function () {
+    document.getElementById('threads').value = 8;
+    document.getElementById('duration').value = 10;
+    document.getElementById('concurrency').value = 6;
+    document.getElementById('pingCount').value = 4;
+    document.getElementById('maxMB').value = 0;
+    document.getElementById('sortBy').value = '';
+    document.getElementById('skipInfo').checked = true;
+    document.getElementById('preflight').checked = true;
+    document.getElementById('filter').value = '';
+    document.getElementById('exclude').value = '';
+    document.getElementById('themeSelect').value = 'default';
+    document.getElementById('bandwidth').value = '';
+    document.getElementById('watermark').value = '';
+    document.getElementById('speedURL').value = '';
+    document.getElementById('pingURL').value = '';
+    savePrefs();
+    showToast('已恢复默认测速参数', 'ok');
+  });
+
+  // 6. 运行状态、ETA 估算与实时流量监控
+  function formatMMSS(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    var m = Math.floor(sec / 60);
+    var s = sec % 60;
+    return (m < 10 ? '0' + m : m) + ':' + (s < 10 ? '0' + s : s);
+  }
+
+  function formatTrafficBytes(bytes) {
+    if (!bytes || bytes <= 0) return '0 MB';
+    var mb = bytes / (1024 * 1024);
+    if (mb >= 1024) return (mb / 1024).toFixed(2) + ' GB';
+    return mb.toFixed(1) + ' MB';
+  }
+
+  function updateProgressUI(stageText) {
+    if (stageText) progressStage.textContent = stageText;
+    var pct = totalNodes > 0 ? Math.min(100, Math.round((completedNodes / totalNodes) * 100)) : 5;
+    progressFill.style.width = pct + '%';
+    var elapsedSec = taskStartMs > 0 ? (Date.now() - taskStartMs) / 1000 : 0;
+    var countStr = totalNodes > 0 ? (completedNodes + ' / ' + totalNodes + ' (' + pct + '%)') : '准备中';
+    var trafficStr = liveTrafficBytes > 0 ? (' · 流量 ' + formatTrafficBytes(liveTrafficBytes)) : '';
+    var etaStr = '';
+    if (completedNodes > 0 && totalNodes > completedNodes && elapsedSec > 2) {
+      var remainSec = ((totalNodes - completedNodes) / completedNodes) * elapsedSec;
+      etaStr = ' · 预计剩余 ~' + formatMMSS(remainSec);
+    }
+    progressRight.textContent = countStr + trafficStr + ' · 已用时 ' + formatMMSS(elapsedSec) + etaStr;
+    statusText.textContent = '测试中 ' + formatMMSS(elapsedSec);
+  }
+
+  function setRunningState(running, startMs) {
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    if (running) {
+      taskStartMs = startMs || Date.now();
+      runBtn.disabled = true;
+      runBtn.textContent = '⏳ 运行中…';
+      cancelBtn.disabled = false;
+      cancelBtn.classList.remove('hidden');
+      statusPill.classList.add('running');
+      runMonitor.classList.remove('hidden');
+      updateProgressUI();
+      elapsedTimer = setInterval(function () { updateProgressUI(); }, 1000);
+    } else {
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 开始测试';
+      cancelBtn.classList.add('hidden');
+      cancelBtn.disabled = false;
+      statusPill.classList.remove('running');
+      statusText.textContent = '就绪';
+    }
+  }
+
+  // 7. 终端日志高亮与解析
+  function appendLog(line) {
+    logLineCount++;
+    logCountBadge.textContent = logLineCount;
+
+    var div = document.createElement('div');
+    div.className = 'log-line';
+    if (/^预检：|^输出目录：|^共 \d+ 个节点|^网络环境：/.test(line)) {
+      div.className += ' info';
+    } else if (/跳过/.test(line)) {
+      div.className += ' warn';
+    } else if (/失败|错误|取消/.test(line)) {
+      div.className += ' err';
+    } else if (/^完成：/.test(line)) {
+      div.className += ' ok';
+    } else if (/^\[\d+\/\d+\]/.test(line)) {
+      div.className += ' node';
+    }
+    div.textContent = line;
+    log.appendChild(div);
+    if (autoScroll.checked) {
+      log.scrollTop = log.scrollHeight;
+    }
+
+    var mTotal = line.match(/^共 (\d+) 个节点/);
+    if (mTotal) {
+      totalNodes = parseInt(mTotal[1], 10) || 0;
+      completedNodes = 0;
+      updateProgressUI('正在并发探测节点与预检路由…');
+    } else if (/^预检：/.test(line)) {
+      updateProgressUI(line);
+    } else if (/^完成：/.test(line)) {
+      completedNodes = totalNodes;
+      updateProgressUI(line);
+    }
+  }
+
+  // 实时流式接收已完成节点 (event: node)
+  function onStreamNode(evt) {
+    if (!evt || !evt.node) return;
+    totalNodes = evt.total || totalNodes;
+    completedNodes = evt.done || (completedNodes + 1);
+
+    if (!currentReport) {
+      currentReport = { total: totalNodes, succeeded: 0, nodes: [], topology: { inbounds: [], outbounds: [] } };
+    }
+    currentReport.total = totalNodes;
+
+    // 去重或替换同序号节点
+    var idx = currentReport.nodes.findIndex(function (x) { return x.index === evt.node.index; });
+    if (idx >= 0) currentReport.nodes[idx] = evt.node;
+    else currentReport.nodes.push(evt.node);
+
+    // 统计成功数与实时消耗流量
+    var okCount = 0;
+    var sumBytes = 0;
+    currentReport.nodes.forEach(function (n) {
+      if (isNodeOK(n)) okCount++;
+      if (n.speed && Array.isArray(n.speed.perSecond)) {
+        n.speed.perSecond.forEach(function (b) { sumBytes += (b || 0); });
+      }
+    });
+    currentReport.succeeded = okCount;
+    liveTrafficBytes = sumBytes;
+
+    updateProgressUI('已完成 [' + completedNodes + '/' + totalNodes + '] ' + (evt.node.name || ''));
+
+    // 实时展现结果卡片与节点明细表
+    resultCard.classList.remove('hidden');
+    resultBadge.textContent = '⚡ 实时流式更新中 (' + completedNodes + '/' + totalNodes + ')';
+    document.getElementById('tabBtnNodes').textContent = '📊 交互式节点明细表 (' + currentReport.nodes.length + ')';
+    renderStatCards(currentReport);
+    renderNodeTable();
+  }
+
+  clearLogBtn.addEventListener('click', function () {
+    log.innerHTML = '';
+    logLineCount = 0;
+    logCountBadge.textContent = '0';
+  });
+
+  copyLogBtn.addEventListener('click', function () {
+    navigator.clipboard.writeText(log.innerText || '').then(function () {
+      showToast('📋 已复制运行日志到剪贴板', 'ok');
+    });
+  });
+
+  // 8. 一键复制 PNG 图片到系统剪贴板
+  function copyImageToClipboard(url, triggerBtn) {
+    var oldText = triggerBtn ? triggerBtn.textContent : '';
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = '⏳ 复制中…';
+    }
+    fetch(url).then(function (r) { return r.blob(); }).then(function (blob) {
+      if (!navigator.clipboard || !window.ClipboardItem) {
+        throw new Error('当前浏览器环境不支持图片剪贴板 API');
+      }
+      var item = new ClipboardItem({ 'image/png': blob });
+      return navigator.clipboard.write([item]);
+    }).then(function () {
+      showToast('📋 图片已复制到剪贴板，可直接 Ctrl+V 粘贴发送！', 'ok');
+      if (triggerBtn) triggerBtn.textContent = '✅ 已复制';
+      setTimeout(function () {
+        if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = oldText; }
+      }, 1500);
+    }).catch(function (err) {
+      showToast('复制图片失败：' + err.message, 'err');
+      if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = oldText; }
     });
   }
 
+  // 9. 结果展示：图片画廊 + 免重测重绘 + JSON 解析交互式表格
+  function imageCategoryMeta(name) {
+    if (/_full\.png$/.test(name)) return { order: 1, label: '📊 综合全维结果图 (Full)' };
+    if (/_speed\.png$/.test(name)) return { order: 2, label: '⚡ 节点速度与延迟图 (Speed)' };
+    if (/_media\.png$/.test(name)) return { order: 3, label: '🎬 流媒体解锁检测图 (Media)' };
+    if (/_ai\.png$/.test(name)) return { order: 4, label: '🤖 AI 平台可用性图 (AI)' };
+    if (/_topology\.png$/.test(name)) return { order: 5, label: '🌐 出入口线路拓扑图 (Topology)' };
+    return { order: 9, label: '🖼️ 结果图' };
+  }
+
+  function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn[data-tab]').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-tab') === tabName);
+    });
+    document.getElementById('tabGallery').classList.toggle('hidden', tabName !== 'gallery');
+    document.getElementById('tabNodes').classList.toggle('hidden', tabName !== 'nodes');
+    document.getElementById('tabTopo').classList.toggle('hidden', tabName !== 'topo');
+  }
+
+  function renderFiles(files, runId, cacheBust, skipJSONFetch) {
+    currentRunId = runId || currentRunId;
+    thumbs.innerHTML = '';
+    jsonLink.classList.add('hidden');
+    galleryList = [];
+    var prefix = currentRunId ? ('/files/' + encodeURIComponent(currentRunId) + '/') : '/files/';
+    var bust = cacheBust ? ('?t=' + cacheBust) : '';
+
+    var pngFiles = [];
+    var jsonFileURL = '';
+    (files || []).forEach(function (name) {
+      if (/_result\.json$/.test(name)) {
+        jsonFileURL = prefix + encodeURIComponent(name);
+        jsonLink.href = jsonFileURL;
+        jsonLink.classList.remove('hidden');
+      } else if (/\.png$/.test(name)) {
+        pngFiles.push(name);
+      }
+    });
+
+    pngFiles.sort(function (a, b) {
+      return imageCategoryMeta(a).order - imageCategoryMeta(b).order;
+    });
+
+    pngFiles.forEach(function (name, idx) {
+      var url = prefix + encodeURIComponent(name) + bust;
+      var meta = imageCategoryMeta(name);
+      galleryList.push({ url: url, name: name, label: meta.label });
+
+      var card = document.createElement('div');
+      card.className = 'img-card';
+      card.innerHTML =
+        '<div class="img-card-head">' +
+          '<span>' + escapeHtml(meta.label) + '</span>' +
+          '<span style="font-size:11px; color:var(--muted);">点击图片全屏放大</span>' +
+        '</div>' +
+        '<div class="img-card-body" data-idx="' + idx + '">' +
+          '<img src="' + url + '" alt="' + escapeHtml(name) + '" loading="lazy">' +
+        '</div>' +
+        '<div class="img-card-actions">' +
+          '<button type="button" class="btn btn-secondary btn-sm copy-img-btn" data-url="' + url + '">📋 复制图片</button>' +
+          '<a class="btn-link" href="' + url + '" download="' + escapeHtml(name) + '">⬇ 下载 PNG</a>' +
+        '</div>';
+      thumbs.appendChild(card);
+    });
+
+    thumbs.querySelectorAll('.img-card-body[data-idx]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        openLightbox(parseInt(el.getAttribute('data-idx'), 10) || 0);
+      });
+    });
+    thumbs.querySelectorAll('.copy-img-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        copyImageToClipboard(btn.getAttribute('data-url'), btn);
+      });
+    });
+
+    if (jsonFileURL && !skipJSONFetch) {
+      fetchAndRenderJSON(jsonFileURL);
+    }
+  }
+
+  // 免重测秒级重绘按钮 (POST /api/rerender)
+  var rerenderBtn = document.getElementById('rerenderBtn');
+  rerenderBtn.addEventListener('click', function () {
+    savePrefs();
+    var oldTxt = rerenderBtn.textContent;
+    rerenderBtn.disabled = true;
+    rerenderBtn.textContent = '⏳ 重绘中…';
+    var t0 = Date.now();
+
+    fetch('/api/rerender', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        runId: currentRunId,
+        sortBy: document.getElementById('sortBy').value,
+        theme: document.getElementById('themeSelect').value,
+        watermark: document.getElementById('watermark').value.trim(),
+        bandwidth: document.getElementById('bandwidth').value.trim()
+      })
+    }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error(t); });
+      return resp.json();
+    }).then(function (res) {
+      var cost = ((Date.now() - t0) / 1000).toFixed(2);
+      renderFiles(res.files || [], res.runId || currentRunId, res.updatedAt || Date.now(), true);
+      showToast('✨ 已按新样式重绘所有结果图（耗时 ' + cost + 's）', 'ok');
+    }).catch(function (err) {
+      showToast('重绘失败：' + err.message, 'err');
+    }).finally(function () {
+      rerenderBtn.disabled = false;
+      rerenderBtn.textContent = oldTxt;
+    });
+  });
+
+  function formatSpeedBytes(bps) {
+    if (!bps || bps < 1) return '0.00 B/s';
+    var units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    var i = 0;
+    var v = bps;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(2) + ' ' + units[i];
+  }
+
+  function fetchAndRenderJSON(url) {
+    fetch(url).then(function (r) { return r.json(); }).then(function (data) {
+      currentReport = data;
+      document.getElementById('tabBtnNodes').textContent =
+        '📊 交互式节点明细表 (' + ((data.nodes && data.nodes.length) || 0) + ')';
+      renderStatCards(data);
+      renderNodeTable();
+      renderTopologyTables(data.topology);
+    }).catch(function () {
+      statGrid.classList.add('hidden');
+    });
+  }
+
+  function renderStatCards(data) {
+    var nodes = data.nodes || [];
+    var total = data.total || nodes.length;
+    var okCount = data.succeeded || 0;
+    var maxPeak = 0, speedSum = 0, speedCount = 0, totalBytes = 0;
+    var minLat = 0, latSum = 0, latCount = 0;
+    var inSet = new Set(), outSet = new Set();
+
+    nodes.forEach(function (n) {
+      if (n.speed && n.speed.max > maxPeak) maxPeak = n.speed.max;
+      if (n.speed && n.speed.avg > 0) { speedSum += n.speed.avg; speedCount++; }
+      if (n.speed && Array.isArray(n.speed.perSecond)) {
+        n.speed.perSecond.forEach(function (b) { totalBytes += (b || 0); });
+      }
+      if (n.latency && n.latency.avgHTTPS > 0) {
+        var l = n.latency.avgHTTPS;
+        if (minLat === 0 || l < minLat) minLat = l;
+        latSum += l;
+        latCount++;
+      }
+      if (n.inbound && n.inbound.ip) inSet.add(n.inbound.ip);
+      if (n.outbound && n.outbound.ip) outSet.add(n.outbound.ip);
+    });
+
+    var rate = total > 0 ? Math.round((okCount / total) * 100) : 0;
+    document.getElementById('statNodes').textContent = okCount + ' / ' + total;
+    document.getElementById('statNodesSub').textContent = '连通率 ' + rate + '% · 耗时 ' + (data.elapsed || '进行中');
+
+    var peakMbps = maxPeak > 0 ? Math.round((maxPeak * 8) / 1e6) + ' Mbps' : '-';
+    var avgSpd = speedCount > 0 ? formatSpeedBytes(speedSum / speedCount) : '-';
+    document.getElementById('statSpeed').textContent = maxPeak > 0 ? formatSpeedBytes(maxPeak) : '-';
+    document.getElementById('statSpeedSub').textContent = '折合带宽 ' + peakMbps + ' · 均速 ' + avgSpd;
+
+    var avgLat = latCount > 0 ? Math.round(latSum / latCount) + ' ms' : '-';
+    document.getElementById('statLatency').textContent = minLat > 0 ? (minLat + ' ms') : '-';
+    document.getElementById('statLatencySub').textContent = '全场平均 HTTPS 延迟 ' + avgLat;
+
+    var inCount = (data.topology && data.topology.inbounds && data.topology.inbounds.length) || inSet.size;
+    var outCount = (data.topology && data.topology.outbounds && data.topology.outbounds.length) || outSet.size;
+    document.getElementById('statTopo').textContent = inCount + ' 入口 → ' + outCount + ' 出口';
+    document.getElementById('statTopoSub').textContent = '累计测速流量 ' + formatTrafficBytes(totalBytes);
+    statGrid.classList.remove('hidden');
+  }
+
+  function isNodeOK(n) {
+    if (n.error) return false;
+    if (n.latency && n.latency.avgHTTPS > 0) return true;
+    if (n.speed && n.speed.avg > 0) return true;
+    if (n.outbound && n.outbound.ip) return true;
+    return false;
+  }
+
+  function formatUnlockBadges(list) {
+    if (!Array.isArray(list) || !list.length) return '<span class="pill pill-muted">-</span>';
+    return list.map(function (u) {
+      var st = u.status;
+      var cls = 'pill-muted';
+      if (st === 'unlock') cls = 'pill-ok';
+      else if (st === 'pending' || st === 'senttocn') cls = 'pill-warn';
+      else if (st === 'failed' || st === 'reqfailed') cls = 'pill-fail';
+      var txt = u.platform;
+      if (u.region) txt += '(' + u.region + ')';
+      else if (st === 'unlock') txt += '✓';
+      else if (st === 'failed') txt += '✗';
+      else if (st === 'reqfailed') txt += '!';
+      return '<span class="pill ' + cls + '" title="' + escapeHtml(u.platform + ': ' + st + (u.info ? ' - ' + u.info : '')) + '">' + escapeHtml(txt) + '</span>';
+    }).join('');
+  }
+
+  function getFilteredAndSortedNodes() {
+    if (!currentReport || !Array.isArray(currentReport.nodes)) return [];
+    var q = (document.getElementById('nodeSearch').value || '').trim().toLowerCase();
+    var stFilter = document.getElementById('nodeStatusFilter').value;
+
+    var rows = currentReport.nodes.filter(function (n) {
+      var ok = isNodeOK(n);
+      if (stFilter === 'ok' && !ok) return false;
+      if (stFilter === 'fail' && ok) return false;
+      if (!q) return true;
+      var unlockText = []
+        .concat(n.media || [], n.ai || [])
+        .map(function (u) { return (u.platform || '') + ' ' + (u.region || '') + ' ' + (u.status || ''); })
+        .join(' ');
+      var hay = [
+        n.name, n.type, n.server,
+        n.inbound && n.inbound.ip, n.inbound && n.inbound.country, n.inbound && n.inbound.org,
+        n.outbound && n.outbound.ip, n.outbound && n.outbound.country, n.outbound && n.outbound.org,
+        unlockText
+      ].join(' ').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+
+    rows.sort(function (a, b) {
+      var va, vb;
+      switch (currentSortKey) {
+        case 'name': va = a.name || ''; vb = b.name || ''; break;
+        case 'type': va = a.type || ''; vb = b.type || ''; break;
+        case 'tls': va = (a.latency && a.latency.avgTlsRTT) || 999999; vb = (b.latency && b.latency.avgTlsRTT) || 999999; break;
+        case 'https': va = (a.latency && a.latency.avgHTTPS) || 999999; vb = (b.latency && b.latency.avgHTTPS) || 999999; break;
+        case 'loss': va = (a.latency && a.latency.packetLoss != null) ? a.latency.packetLoss : 1; vb = (b.latency && b.latency.packetLoss != null) ? b.latency.packetLoss : 1; break;
+        case 'avgSpeed': va = (a.speed && a.speed.avg) || 0; vb = (b.speed && b.speed.avg) || 0; break;
+        case 'maxSpeed': va = (a.speed && a.speed.max) || 0; vb = (b.speed && b.speed.max) || 0; break;
+        case 'inbound': va = (a.inbound && a.inbound.ip) || ''; vb = (b.inbound && b.inbound.ip) || ''; break;
+        case 'outbound': va = (a.outbound && a.outbound.ip) || ''; vb = (b.outbound && b.outbound.ip) || ''; break;
+        default: va = a.index || 0; vb = b.index || 0;
+      }
+      if (va < vb) return currentSortAsc ? -1 : 1;
+      if (va > vb) return currentSortAsc ? 1 : -1;
+      return 0;
+    });
+    return rows;
+  }
+
+  function renderNodeTable() {
+    var tbody = document.getElementById('nodeTableBody');
+    tbody.innerHTML = '';
+    var rows = getFilteredAndSortedNodes();
+
+    rows.forEach(function (n) {
+      var tr = document.createElement('tr');
+      var tls = (n.latency && n.latency.avgTlsRTT > 0) ? (n.latency.avgTlsRTT + ' ms') : '-';
+      var https = (n.latency && n.latency.avgHTTPS > 0) ? (n.latency.avgHTTPS + ' ms') : '-';
+      var loss = (n.latency && n.latency.packetLoss != null) ? Math.round(n.latency.packetLoss * 100) + '%' : '-';
+      var avgSpd = (n.speed && n.speed.avg > 0) ? formatSpeedBytes(n.speed.avg) : '-';
+      var maxSpd = (n.speed && n.speed.max > 0) ? formatSpeedBytes(n.speed.max) : '-';
+
+      var inStr = n.inbound && n.inbound.ip
+        ? '<span class="ip-copy" data-ip="' + escapeHtml(n.inbound.ip) + '" title="点击复制 IP">' + escapeHtml(n.inbound.ip) + '</span> <small style="color:var(--muted)">(' + escapeHtml(n.inbound.country || '-') + ')</small>'
+        : '-';
+      var outStr = n.outbound && n.outbound.ip
+        ? '<span class="ip-copy" data-ip="' + escapeHtml(n.outbound.ip) + '" title="点击复制 IP">' + escapeHtml(n.outbound.ip) + '</span> <small style="color:var(--muted)">(' + escapeHtml(n.outbound.country || '-') + ' · ' + escapeHtml(n.outbound.org || n.outbound.asn || '') + ')</small>'
+        : (n.error ? '<span class="pill pill-fail">' + escapeHtml(n.error) + '</span>' : '-');
+
+      tr.innerHTML =
+        '<td>' + (n.index || '-') + '</td>' +
+        '<td style="font-weight:600;">' + escapeHtml(n.name || '-') + '</td>' +
+        '<td><span class="pill pill-muted">' + escapeHtml(n.type || '-') + '</span></td>' +
+        '<td>' + tls + '</td>' +
+        '<td>' + (https !== '-' ? '<span class="pill pill-ok">' + https + '</span>' : '<span class="pill pill-fail">-</span>') + '</td>' +
+        '<td>' + loss + '</td>' +
+        '<td style="font-weight:600;">' + avgSpd + '</td>' +
+        '<td>' + maxSpd + '</td>' +
+        '<td>' + inStr + '</td>' +
+        '<td>' + outStr + '</td>' +
+        '<td class="wrap-cell">' + formatUnlockBadges(n.media) + '</td>' +
+        '<td class="wrap-cell">' + formatUnlockBadges(n.ai) + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+
+  // 导出 CSV 表格
+  document.getElementById('exportCsvBtn').addEventListener('click', function () {
+    var rows = getFilteredAndSortedNodes();
+    if (!rows.length) {
+      showToast('当前没有可导出的节点数据', 'warn');
+      return;
+    }
+    var headers = ['序号', '节点名称', '协议', 'TLS_RTT(ms)', 'HTTPS延迟(ms)', '丢包率(%)', '平均速度(MB/s)', '最高速度(MB/s)', '入口IP', '入口地区', '落地出口IP', '出口地区', '出口ASN/组织', '流媒体解锁', 'AI解锁', '错误原因'];
+    var csvLines = [headers.join(',')];
+    rows.forEach(function (n) {
+      var mediaStr = (n.media || []).map(function (u) { return u.platform + ':' + (u.region || u.status); }).join('; ');
+      var aiStr = (n.ai || []).map(function (u) { return u.platform + ':' + (u.region || u.status); }).join('; ');
+      var cols = [
+        n.index || '',
+        n.name || '',
+        n.type || '',
+        (n.latency && n.latency.avgTlsRTT) || '',
+        (n.latency && n.latency.avgHTTPS) || '',
+        (n.latency && n.latency.packetLoss != null) ? Math.round(n.latency.packetLoss * 100) : '',
+        (n.speed && n.speed.avg) ? (n.speed.avg / 1048576).toFixed(2) : '',
+        (n.speed && n.speed.max) ? (n.speed.max / 1048576).toFixed(2) : '',
+        (n.inbound && n.inbound.ip) || '',
+        (n.inbound && n.inbound.country) || '',
+        (n.outbound && n.outbound.ip) || '',
+        (n.outbound && n.outbound.country) || '',
+        (n.outbound && (n.outbound.org || n.outbound.asn)) || '',
+        mediaStr,
+        aiStr,
+        n.error || ''
+      ].map(function (v) {
+        return '"' + String(v).replace(/"/g, '""') + '"';
+      });
+      csvLines.push(cols.join(','));
+    });
+    var blob = new Blob(['\uFEFF' + csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'nekospeed_nodes_' + (currentRunId || 'export') + '.csv';
+    a.click();
+    showToast('⬇ 已导出 ' + rows.length + ' 条节点数据到 CSV', 'ok');
+  });
+
+  function renderTopologyTables(topo) {
+    var inBody = document.getElementById('inboundTableBody');
+    var outBody = document.getElementById('outboundTableBody');
+    inBody.innerHTML = '';
+    outBody.innerHTML = '';
+    if (!topo) return;
+
+    (topo.inbounds || []).forEach(function (e) {
+      var g = e.geo || {};
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + e.index + '</td>' +
+        '<td><span class="ip-copy" data-ip="' + escapeHtml(g.ip || '') + '">' + escapeHtml(g.ip || '-') + '</span></td>' +
+        '<td>' + escapeHtml((g.country || '') + (g.city ? ' · ' + g.city : '')) + '</td>' +
+        '<td class="topo-wrap">' + escapeHtml((g.asn || '') + ' ' + (g.org || g.isp || '')) + '</td>' +
+        '<td><span class="pill pill-muted">IPv' + escapeHtml(g.stack || '4') + '</span></td>' +
+        '<td><b>' + (e.outCount || 0) + '</b></td>';
+      inBody.appendChild(tr);
+    });
+
+    (topo.outbounds || []).forEach(function (e, idx) {
+      var g = e.geo || {};
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + (idx + 1) + '</td>' +
+        '<td>入口 #' + e.inboundIndex + '</td>' +
+        '<td><span class="ip-copy" data-ip="' + escapeHtml(g.ip || '') + '">' + escapeHtml(g.ip || '-') + '</span></td>' +
+        '<td>' + escapeHtml(g.country || '-') + '</td>' +
+        '<td class="topo-wrap">' + escapeHtml((g.asn || '') + ' ' + (g.org || '')) + '</td>' +
+        '<td class="topo-wrap" style="font-weight:600;">' + escapeHtml(e.nodeName || '-') + '</td>';
+      outBody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('nodeSearch').addEventListener('input', renderNodeTable);
+  document.getElementById('nodeStatusFilter').addEventListener('change', renderNodeTable);
+  document.querySelectorAll('#nodeTable th[data-sort]').forEach(function (th) {
+    th.addEventListener('click', function () {
+      var key = th.getAttribute('data-sort');
+      if (currentSortKey === key) currentSortAsc = !currentSortAsc;
+      else { currentSortKey = key; currentSortAsc = (key !== 'avgSpeed' && key !== 'maxSpeed'); }
+      renderNodeTable();
+    });
+  });
+
+  // 点击 IP 一键复制
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest('.ip-copy');
+    if (!el) return;
+    var ip = el.getAttribute('data-ip');
+    if (!ip) return;
+    navigator.clipboard.writeText(ip).then(function () {
+      showToast('📋 已复制 IP：' + ip, 'ok');
+    });
+  });
+
+  // Tab 切换
+  document.querySelectorAll('.tab-btn[data-tab]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      switchTab(btn.getAttribute('data-tab'));
+    });
+  });
+
+  // 10. 全屏 Lightbox 控制
+  var lightbox = document.getElementById('lightbox');
+  var lightboxImg = document.getElementById('lightboxImg');
+  var lbTitle = document.getElementById('lbTitle');
+  var lbZoomLabel = document.getElementById('lbZoomLabel');
+  var lbDownloadBtn = document.getElementById('lbDownloadBtn');
+  var lbCopyBtn = document.getElementById('lbCopyBtn');
+
+  function applyLbZoom() {
+    lightboxImg.style.width = lbZoom + '%';
+    lightboxImg.style.maxWidth = lbZoom > 100 ? 'none' : '96%';
+    lbZoomLabel.textContent = lbZoom + '%';
+  }
+
+  function openLightbox(idx) {
+    if (!galleryList.length) return;
+    lbIndex = (idx + galleryList.length) % galleryList.length;
+    var item = galleryList[lbIndex];
+    lightboxImg.src = item.url;
+    lbTitle.textContent = item.label + ' — ' + item.name + ' (' + (lbIndex + 1) + '/' + galleryList.length + ')';
+    lbDownloadBtn.href = item.url;
+    lbDownloadBtn.setAttribute('download', item.name);
+    lbZoom = 100;
+    applyLbZoom();
+    lightbox.classList.add('open');
+  }
+
+  function closeLightbox() { lightbox.classList.remove('open'); }
+  document.getElementById('lbCloseBtn').addEventListener('click', closeLightbox);
+  document.getElementById('lbStage').addEventListener('click', function (e) {
+    if (e.target === document.getElementById('lbStage')) closeLightbox();
+  });
+  document.getElementById('lbPrevBtn').addEventListener('click', function () { openLightbox(lbIndex - 1); });
+  document.getElementById('lbNextBtn').addEventListener('click', function () { openLightbox(lbIndex + 1); });
+  document.getElementById('lbZoomInBtn').addEventListener('click', function () { lbZoom = Math.min(250, lbZoom + 25); applyLbZoom(); });
+  document.getElementById('lbZoomOutBtn').addEventListener('click', function () { lbZoom = Math.max(50, lbZoom - 25); applyLbZoom(); });
+  lbCopyBtn.addEventListener('click', function () {
+    if (galleryList[lbIndex]) copyImageToClipboard(galleryList[lbIndex].url, lbCopyBtn);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (lightbox.classList.contains('open')) {
+      if (e.key === 'Escape') closeLightbox();
+      else if (e.key === 'ArrowLeft') openLightbox(lbIndex - 1);
+      else if (e.key === 'ArrowRight') openLightbox(lbIndex + 1);
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !runBtn.disabled) {
+      e.preventDefault();
+      runBtn.click();
+    }
+  });
+
+  // 11. 历史记录管理（首屏自动加载最新一条历史记录，告别空白首屏）
+  function selectHistoryItem(id, isAutoInit) {
+    if (!id || !historyMap[id]) {
+      deleteHistoryBtn.classList.add('hidden');
+      return;
+    }
+    historySelect.value = id;
+    deleteHistoryBtn.classList.remove('hidden');
+    var item = historyMap[id];
+    currentRunId = item.id;
+    resultCard.classList.remove('hidden');
+    resultBadge.textContent = isAutoInit ? '最近测速报告' : '历史记录';
+    summary.innerHTML = '<span style="color:var(--primary)">📂 ' + escapeHtml(item.title) + '</span>';
+    renderFiles(item.files, item.id);
+  }
+
+  function loadHistory(preferId) {
+    fetch('/api/history').then(function (r) { return r.json(); }).then(function (items) {
+      var cur = preferId || historySelect.value;
+      historySelect.innerHTML = '<option value="">📂 历史测速记录（共 ' + (items ? items.length : 0) + ' 条）…</option>';
+      historyMap = {};
+      (items || []).forEach(function (item) {
+        historyMap[item.id] = item;
+        var opt = document.createElement('option');
+        opt.value = item.id;
+        opt.textContent = item.title;
+        historySelect.appendChild(opt);
+      });
+      if (cur && historyMap[cur]) {
+        historySelect.value = cur;
+        deleteHistoryBtn.classList.remove('hidden');
+      } else if (!initialHistoryLoaded && items && items.length > 0 && !statusPill.classList.contains('running')) {
+        initialHistoryLoaded = true;
+        selectHistoryItem(items[0].id, true);
+      } else {
+        deleteHistoryBtn.classList.add('hidden');
+      }
+      initialHistoryLoaded = true;
+    }).catch(function () {});
+  }
+
+  historySelect.addEventListener('change', function () {
+    selectHistoryItem(historySelect.value, false);
+  });
+
+  refreshHistoryBtn.addEventListener('click', function () {
+    loadHistory();
+    showToast('🔄 已刷新历史记录列表', 'ok');
+  });
+
+  deleteHistoryBtn.addEventListener('click', function () {
+    var id = historySelect.value;
+    if (!id || !historyMap[id]) return;
+    var title = historyMap[id].title;
+    if (!confirm('确定要永久删除历史记录「' + title + '」吗？')) return;
+    fetch('/api/history/' + encodeURIComponent(id), { method: 'DELETE' }).then(function (resp) {
+      if (!resp.ok) return resp.text().then(function (t) { throw new Error(t); });
+      historySelect.value = '';
+      deleteHistoryBtn.classList.add('hidden');
+      initialHistoryLoaded = false;
+      loadHistory();
+      showToast('🗑️ 已删除历史记录：' + id, 'ok');
+    }).catch(function (err) {
+      showToast('删除失败：' + err.message, 'err');
+    });
+  });
+
+  // 12. 初始化后端状态与物理网卡直连指示器
+  fetch('/api/status').then(function (r) { return r.json(); }).then(function (st) {
+    if (st.netEnv && st.netEnv.physicalInterface) {
+      netEnvBadge.classList.remove('hidden');
+      if (st.netEnv.tunDetected) {
+        netEnvBadge.classList.add('tun-warn');
+        netEnvText.textContent = '已绕过本地 TUN · 物理直连: ' + st.netEnv.physicalInterface;
+        netEnvBadge.title = '检测到本地虚拟网卡 (' + (st.netEnv.tunInterfaces || []).join(', ') + ')，已强制绑定物理网卡 ' + st.netEnv.physicalInterface + ' (' + (st.netEnv.physicalIP || '') + ') 直连，杜绝代理套代理';
+      } else {
+        netEnvText.textContent = '物理网卡直连: ' + st.netEnv.physicalInterface;
+        netEnvBadge.title = '测速套接字已绑定物理网卡 ' + st.netEnv.physicalInterface + ' (' + (st.netEnv.physicalIP || '') + ')';
+      }
+    }
+    if (st.running) {
+      currentRunId = st.runId || '';
+      setRunningState(true, st.startedAt);
+    }
+  }).catch(function () {});
+
+  // 13. SSE 实时事件流与启动/取消任务
+  function onDone(evt) {
+    setRunningState(false);
+    resultCard.classList.remove('hidden');
+    resultBadge.textContent = '本次测速结果';
+    if (!evt.ok) {
+      summary.innerHTML = '<span style="color:var(--danger)">❌ 任务结束：' + escapeHtml(evt.error || '未知错误') + '</span>';
+      showToast('任务中断：' + (evt.error || '未知错误'), 'err');
+      return;
+    }
+    progressStage.textContent = '✅ 测速任务全部完成';
+    progressFill.style.width = '100%';
+    summary.innerHTML = '<span style="color:var(--success)">✅ 成功 ' + evt.succeeded + ' / ' + evt.total +
+      ' 个节点</span> · 总耗时 ' + evt.elapsed;
+    switchTab('gallery');
+    renderFiles(evt.files || [], evt.runId || '', Date.now(), false);
+    loadHistory(evt.runId || '');
+    showToast('🎉 测速全部完成！成功 ' + evt.succeeded + '/' + evt.total + ' 个节点', 'ok');
+  }
+
   function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, function (c) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
 
-  lightbox.addEventListener('click', function () { lightbox.style.display = 'none'; });
-
   var es = new EventSource('/api/events');
   es.onmessage = function (e) { appendLog(e.data); };
+  es.addEventListener('node', function (e) {
+    try { onStreamNode(JSON.parse(e.data)); } catch (err) {}
+  });
   es.addEventListener('done', function (e) {
     try { onDone(JSON.parse(e.data)); } catch (err) { appendLog('解析结果失败: ' + err); }
   });
-  es.onerror = function () { /* 浏览器自动重连 */ };
+  es.onerror = function () {};
+
+  loadPrefs();
+  loadHistory();
+
+  cancelBtn.addEventListener('click', function () {
+    cancelBtn.disabled = true;
+    fetch('/api/cancel', { method: 'POST' }).then(function () {
+      showToast('⏹ 正在停止当前测速任务…', 'warn');
+    }).catch(function () {});
+  });
 
   runBtn.addEventListener('click', function () {
-    var source = document.getElementById('source').value.trim();
-    if (!source) { alert('请填写订阅链接或本地文件路径'); return; }
+    var rawSource = document.getElementById('source').value.trim();
+    var inlineText = pastedContent.value.trim();
+    if (!rawSource && !inlineText) {
+      showToast('请先填写订阅链接或上传/粘贴节点配置', 'warn');
+      document.getElementById('source').focus();
+      return;
+    }
     var tests = [];
     document.querySelectorAll('#tests input:checked').forEach(function (cb) { tests.push(cb.value); });
-    if (!tests.length) { alert('请至少选择一项测试'); return; }
+    if (!tests.length) {
+      showToast('请至少勾选一项测试模块', 'warn');
+      return;
+    }
+    if (nodePickerActive && previewNodesData.length > 0 && selectedIndicesSet.size === 0) {
+      showToast('您在「挑节点」中清空了所有节点，请至少勾选 1 个节点', 'warn');
+      return;
+    }
+
+    savePrefs();
+    var cleanSource = rawSource.indexOf('[已加载本地文件]') === 0 ? '' : rawSource;
+    if (cleanSource) rememberSubSource(cleanSource);
+
+    var threadsVal = parseInt(document.getElementById('threads').value, 10) || 8;
+    var selectedIndices = [];
+    if (nodePickerActive && previewNodesData.length > 0 && selectedIndicesSet.size < previewNodesData.length) {
+      selectedIndices = Array.from(selectedIndicesSet);
+    }
 
     var body = {
-      source: source,
+      source: cleanSource,
+      content: inlineText,
+      filename: uploadedFilename,
+      name: document.getElementById('subName').value.trim(),
       tests: tests.join(','),
-      threads: parseInt(document.getElementById('threads').value, 10) || 8,
+      threads: threadsVal,
       duration: parseInt(document.getElementById('duration').value, 10) || 10,
-      concurrency: parseInt(document.getElementById('concurrency').value, 10) || 8,
+      concurrency: parseInt(document.getElementById('concurrency').value, 10) || 6,
       pingCount: parseInt(document.getElementById('pingCount').value, 10) || 4,
-      single: document.getElementById('single').checked,
+      maxMB: parseInt(document.getElementById('maxMB').value, 10) || 0,
+      sortBy: document.getElementById('sortBy').value,
+      single: threadsVal === 1,
+      skipInfo: document.getElementById('skipInfo').checked,
+      preflight: document.getElementById('preflight').checked,
       filter: document.getElementById('filter').value.trim(),
-      proxy: document.getElementById('proxy').value.trim()
+      exclude: document.getElementById('exclude').value.trim(),
+      proxy: document.getElementById('proxy').value.trim(),
+      theme: document.getElementById('themeSelect').value,
+      bandwidth: document.getElementById('bandwidth').value.trim(),
+      watermark: document.getElementById('watermark').value.trim(),
+      speedURL: document.getElementById('speedURL').value.trim(),
+      pingURL: document.getElementById('pingURL').value.trim(),
+      selectedIndices: selectedIndices
     };
 
-    log.textContent = '';
-    resultCard.classList.add('hidden');
+    log.innerHTML = '';
+    logLineCount = 0;
+    logCountBadge.textContent = '0';
+    totalNodes = 0;
+    completedNodes = 0;
+    liveTrafficBytes = 0;
+    currentReport = { total: 0, succeeded: 0, nodes: [], topology: { inbounds: [], outbounds: [] } };
+    nodePickerDrawer.classList.add('hidden');
+
     fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }).then(function (resp) {
-      if (resp.status === 409) { alert('已有任务在运行中，请等待完成'); return null; }
+      if (resp.status === 409) {
+        showToast('已有任务在运行中，请等待完成或点击停止', 'warn');
+        return null;
+      }
       if (!resp.ok) { return resp.text().then(function (t) { throw new Error(t); }); }
-      runBtn.disabled = true;
-      runBtn.textContent = '测试运行中…';
-      return null;
+      return resp.json();
+    }).then(function (res) {
+      if (!res) return;
+      currentRunId = res.runId || '';
+      setRunningState(true, Date.now());
+      updateProgressUI('正在拉取订阅并初始化节点池…');
+      // 切换到节点明细表以准备展示实时流式结果
+      resultCard.classList.remove('hidden');
+      resultBadge.textContent = '⚡ 正在初始化测速…';
+      summary.innerHTML = '<span style="color:var(--primary)">⏳ 已启动测试，节点完成后将在此实时流式刷新…</span>';
+      switchTab('nodes');
+      renderNodeTable();
     }).catch(function (err) {
-      if (err) { appendLog('启动失败: ' + err.message); }
+      if (err) {
+        appendLog('启动失败: ' + err.message);
+        showToast('启动失败：' + err.message, 'err');
+      }
     });
   });
 })();

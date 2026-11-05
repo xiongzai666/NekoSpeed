@@ -21,6 +21,12 @@ var defaultSpeedURLs = []string{
 // 共享原子字节计数器；主 goroutine 每秒采样一次写入 PerSecond（共 durationSec 个）。
 // 单线程连接失败自动换 URL/重连，不拖垮整个测试。
 func Speed(ctx context.Context, d model.Dialer, url string, threads, durationSec int) *model.SpeedResult {
+	return SpeedWithLimit(ctx, d, url, threads, durationSec, 0)
+}
+
+// SpeedWithLimit 同 Speed，但支持单节点最大下载字节上限 maxBytes（<=0 表示不限制）。
+// 达到上限时立即停止后台下载并在当前采样周期结束后提前返回，避免大带宽节点过度消耗订阅流量。
+func SpeedWithLimit(ctx context.Context, d model.Dialer, url string, threads, durationSec int, maxBytes int64) *model.SpeedResult {
 	urls := defaultSpeedURLs
 	if url != "" {
 		urls = []string{url}
@@ -35,7 +41,7 @@ func Speed(ctx context.Context, d model.Dialer, url string, threads, durationSec
 	// 兜底超时：测速时长 + 15s
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(durationSec)*time.Second+15*time.Second)
 	defer cancel()
-	// dlCtx 在采样结束时取消，让工作线程尽快收工
+	// dlCtx 在采样结束或达到流量上限时取消，让工作线程尽快收工
 	dlCtx, stopDownload := context.WithCancel(ctx)
 	defer stopDownload()
 
@@ -45,7 +51,7 @@ func Speed(ctx context.Context, d model.Dialer, url string, threads, durationSec
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			downloadLoop(dlCtx, d, urls, workerID, &total)
+			downloadLoop(dlCtx, d, urls, workerID, &total, maxBytes, stopDownload)
 		}(i)
 	}
 
@@ -69,6 +75,9 @@ loop:
 			if delta > res.Max {
 				res.Max = delta
 			}
+			if maxBytes > 0 && cur >= maxBytes {
+				break loop
+			}
 		}
 	}
 	stopDownload()
@@ -85,7 +94,7 @@ loop:
 }
 
 // downloadLoop 单个工作线程：循环下载直到 ctx 取消；失败换下一个 URL 重连。
-func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID int, total *atomic.Int64) {
+func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID int, total *atomic.Int64, maxBytes int64, stop context.CancelFunc) {
 	transport := &http.Transport{
 		DialContext:           d.DialContext,
 		Proxy:                 nil,
@@ -101,7 +110,7 @@ func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID i
 			return
 		}
 		target := urls[(workerID+attempt)%len(urls)]
-		downloadOnce(ctx, client, target, total)
+		downloadOnce(ctx, client, target, total, maxBytes, stop)
 		if ctx.Err() != nil {
 			return
 		}
@@ -115,7 +124,7 @@ func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID i
 }
 
 // downloadOnce 下载一次 target，把读到的字节计入 total。
-func downloadOnce(ctx context.Context, client *http.Client, target string, total *atomic.Int64) {
+func downloadOnce(ctx context.Context, client *http.Client, target string, total *atomic.Int64, maxBytes int64, stop context.CancelFunc) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return
@@ -129,15 +138,20 @@ func downloadOnce(ctx context.Context, client *http.Client, target string, total
 	if resp.StatusCode >= 400 {
 		return
 	}
-	_, _ = io.Copy(countingWriter{total: total}, resp.Body)
+	_, _ = io.Copy(countingWriter{total: total, maxBytes: maxBytes, stop: stop}, resp.Body)
 }
 
 // countingWriter 把写入字节数累加到共享原子计数器，数据本体丢弃。
 type countingWriter struct {
-	total *atomic.Int64
+	total    *atomic.Int64
+	maxBytes int64
+	stop     context.CancelFunc
 }
 
 func (w countingWriter) Write(p []byte) (int, error) {
-	w.total.Add(int64(len(p)))
+	cur := w.total.Add(int64(len(p)))
+	if w.maxBytes > 0 && cur >= w.maxBytes && w.stop != nil {
+		w.stop()
+	}
 	return len(p), nil
 }

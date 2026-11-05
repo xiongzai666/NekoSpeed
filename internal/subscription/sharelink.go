@@ -19,21 +19,27 @@ var typeDisplayNames = map[string]string{
 	"vmess":     "Vmess",
 	"vless":     "Vless",
 	"trojan":    "Trojan",
+	"hysteria":  "Hysteria",
 	"hysteria2": "Hysteria2",
 	"tuic":      "Tuic",
+	"anytls":    "AnyTLS",
+	"wireguard": "WireGuard",
 	"snell":     "Snell",
 }
 
-// shareSchemes 支持的分享链接 scheme（hy2 是 hysteria2 的别名）。
+// shareSchemes 支持的分享链接 scheme（hy2 是 hysteria2 的别名，hy 是 hysteria 的别名）。
 var shareSchemes = map[string]string{
 	"ss":        "ss",
 	"ssr":       "ssr",
 	"vmess":     "vmess",
 	"vless":     "vless",
 	"trojan":    "trojan",
+	"hysteria":  "hysteria",
+	"hy":        "hysteria",
 	"hysteria2": "hysteria2",
 	"hy2":       "hysteria2",
 	"tuic":      "tuic",
+	"anytls":    "anytls",
 	"snell":     "snell",
 }
 
@@ -67,7 +73,7 @@ func ParseShareLink(line string) (model.Node, error) {
 		node, err = parseSSR(body)
 	case "vmess":
 		node, err = parseVmess(body)
-	case "vless", "trojan", "hysteria2", "tuic", "snell":
+	case "vless", "trojan", "hysteria", "hysteria2", "tuic", "anytls", "snell":
 		node, err = parseURLLink(typ, line)
 	}
 	if err != nil {
@@ -334,10 +340,10 @@ func parseURLLink(typ, line string) (model.Node, error) {
 	raw := map[string]any{
 		"name": u.Fragment, "type": typ, "server": host,
 	}
-	// hysteria2 支持端口段（如 443 或留空走 ports），其余协议端口必须是数字
+	// hysteria/hysteria2 支持端口段（如 443 或留空走 ports），其余协议端口必须是数字
 	if port, err := strconv.Atoi(portStr); err == nil {
 		raw["port"] = port
-	} else if typ == "hysteria2" && portStr != "" {
+	} else if (typ == "hysteria2" || typ == "hysteria") && portStr != "" {
 		raw["ports"] = portStr
 	} else {
 		return model.Node{}, fmt.Errorf("%s 链接端口无效: %q", typ, portStr)
@@ -348,10 +354,14 @@ func parseURLLink(typ, line string) (model.Node, error) {
 		fillVless(raw, u, q)
 	case "trojan":
 		fillTrojan(raw, u, q)
+	case "hysteria":
+		fillHysteria(raw, u, q)
 	case "hysteria2":
 		fillHysteria2(raw, u, q)
 	case "tuic":
 		fillTuic(raw, u, q)
+	case "anytls":
+		fillAnyTLS(raw, u, q)
 	case "snell":
 		fillSnell(raw, u, q)
 	}
@@ -414,6 +424,65 @@ func fillTrojan(raw map[string]any, u *url.URL, q url.Values) {
 	}
 	raw["udp"] = true
 	fillNetwork(raw, q)
+}
+
+// fillHysteria 填充 hysteria v1 字段：auth-str/sni/obfs/up/down/alpn 等。
+func fillHysteria(raw map[string]any, u *url.URL, q url.Values) {
+	auth := q.Get("auth")
+	if auth == "" && u.User != nil {
+		auth = u.User.Username()
+	}
+	if auth != "" {
+		raw["auth-str"] = auth
+	}
+	if sni := q.Get("peer"); sni != "" {
+		raw["sni"] = sni
+	} else if sni := q.Get("sni"); sni != "" {
+		raw["sni"] = sni
+	}
+	if boolish(q.Get("insecure")) || boolish(q.Get("allowInsecure")) {
+		raw["skip-cert-verify"] = true
+	}
+	if obfs := q.Get("obfsParam"); obfs != "" {
+		raw["obfs"] = obfs
+	} else if obfs := q.Get("obfs"); obfs != "" {
+		raw["obfs"] = obfs
+	}
+	if up := q.Get("upmbps"); up != "" {
+		raw["up"] = up
+	} else {
+		raw["up"] = "100 Mbps"
+	}
+	if down := q.Get("downmbps"); down != "" {
+		raw["down"] = down
+	} else {
+		raw["down"] = "100 Mbps"
+	}
+	if alpn := q.Get("alpn"); alpn != "" {
+		raw["alpn"] = splitComma(alpn)
+	}
+}
+
+// fillAnyTLS 填充 anytls 字段：password/sni/alpn/client-fingerprint 等。
+func fillAnyTLS(raw map[string]any, u *url.URL, q url.Values) {
+	if u.User != nil {
+		raw["password"] = u.User.Username()
+	}
+	if sni := q.Get("sni"); sni != "" {
+		raw["sni"] = sni
+	} else if peer := q.Get("peer"); peer != "" {
+		raw["sni"] = peer
+	}
+	if fp := q.Get("fp"); fp != "" {
+		raw["client-fingerprint"] = fp
+	}
+	if boolish(q.Get("insecure")) || boolish(q.Get("allowInsecure")) || boolish(q.Get("allow_insecure")) {
+		raw["skip-cert-verify"] = true
+	}
+	if alpn := q.Get("alpn"); alpn != "" {
+		raw["alpn"] = splitComma(alpn)
+	}
+	raw["udp"] = true
 }
 
 // fillHysteria2 填充 hysteria2 字段：password/sni/obfs/obfs-password 等。

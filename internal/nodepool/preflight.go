@@ -14,11 +14,11 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
-	"github.com/miekg/dns"
 
 	"nekospeed/internal/model"
 )
@@ -63,15 +63,22 @@ func PreflightServers(ctx context.Context, nodes []model.Node) PreflightResult {
 			res.SkippedHosts++
 			continue // 已是 IP，无需预检
 		}
+		if isUDPOnlyNode(n) {
+			res.SkippedHosts++
+			continue // 纯 UDP 协议（如 Hysteria2 / TUIC），不适用 TCP 端口预检
+		}
+		p := rawPort(n.Raw)
+		if p == 0 {
+			res.SkippedHosts++
+			continue
+		}
 		h, ok := hosts[server]
 		if !ok {
 			h = &hostInfo{ports: map[uint16]struct{}{}}
 			hosts[server] = h
 			order = append(order, server)
 		}
-		if p := rawPort(n.Raw); p != 0 {
-			h.ports[p] = struct{}{}
-		}
+		h.ports[p] = struct{}{}
 	}
 
 	var mu sync.Mutex
@@ -144,7 +151,7 @@ func sampleIPs(ctx context.Context, host string) []netip.Addr {
 
 	add := func(a netip.Addr) {
 		a = a.Unmap()
-		if !a.Is4() {
+		if !a.Is4() || IsFakeIPAddr(a) {
 			return
 		}
 		mu.Lock()
@@ -183,28 +190,9 @@ func sampleIPs(ctx context.Context, host string) []netip.Addr {
 	return out
 }
 
-// queryA 向指定 DNS 服务器查询 host 的 A 记录（含 CNAME 链末端记录）。
+// queryA 向指定 DNS 服务器查询 host 的 A 记录（含 CNAME 链末端记录，自动绕过 Fake-IP）。
 func queryA(ctx context.Context, server, host string) []netip.Addr {
-	c := &dns.Client{Timeout: 3 * time.Second}
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(host), dns.TypeA)
-	m.RecursionDesired = true
-
-	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	r, _, err := c.ExchangeContext(rctx, m, server)
-	if err != nil || r == nil {
-		return nil
-	}
-	var out []netip.Addr
-	for _, rr := range r.Answer {
-		if a, ok := rr.(*dns.A); ok {
-			if addr, ok2 := netip.AddrFromSlice(a.A); ok2 {
-				out = append(out, addr)
-			}
-		}
-	}
-	return out
+	return QueryADirect(ctx, server, host)
 }
 
 // probeIPs 并发 TCP 探测 ips 的全部端口，返回通过所有端口探测的 IP（按输入顺序）。
@@ -240,15 +228,32 @@ func probeIPs(ctx context.Context, ips []netip.Addr, portList []uint16) []netip.
 	return good
 }
 
-// tcpProbe 以 PreflightTimeout 尝试 TCP 连接 ip:port，成功即视为该 IP 存活。
+// tcpProbe 以 PreflightTimeout 尝试经物理网卡 TCP 连接 ip:port，成功即视为该 IP 存活。
 func tcpProbe(ctx context.Context, ip netip.Addr, port uint16) bool {
-	d := net.Dialer{Timeout: PreflightTimeout}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
+	pctx, cancel := context.WithTimeout(ctx, PreflightTimeout)
+	defer cancel()
+	conn, err := DialDirectContext(pctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// isUDPOnlyNode 判断节点是否为纯 UDP 协议（如 Hysteria2 / Hysteria / TUIC / WireGuard）。
+// 这类节点服务端往往不监听 TCP 端口，对其执行 TCP SYN 探测会误判为不可达并白白等待 6 秒。
+func isUDPOnlyNode(n model.Node) bool {
+	t := strings.ToLower(strings.TrimSpace(n.Type))
+	if n.Raw != nil {
+		if rt, ok := n.Raw["type"].(string); ok && rt != "" {
+			t = strings.ToLower(strings.TrimSpace(rt))
+		}
+	}
+	switch t {
+	case "hysteria2", "hy2", "hysteria", "hy", "tuic", "wireguard", "wg":
+		return true
+	}
+	return false
 }
 
 // rawPort 从 clash 节点配置中提取端口（int / float64 / string 均可）。

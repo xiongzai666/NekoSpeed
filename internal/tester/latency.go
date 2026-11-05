@@ -47,7 +47,7 @@ func Latency(ctx context.Context, d model.Dialer, pingURL string, count int) *mo
 		res.HTTPCode = code
 	}
 	res.PacketLoss = float64(failed) / float64(count)
-	res.AvgTLSRTT = avgInts(res.TLSRTT)
+	res.AvgTLSRTT = avgPositiveInts(res.TLSRTT)
 	res.AvgHTTPS = avgInts(res.HTTPSPing)
 	return res
 }
@@ -159,4 +159,19 @@ func avgInts(xs []int) int {
 		sum += x
 	}
 	return sum / len(xs)
+}
+
+// avgPositiveInts 仅对 > 0 的样本求平均，避免 QUIC/HTTP 连接复用产生的 0ms 稀释握手延迟。
+func avgPositiveInts(xs []int) int {
+	sum, n := 0, 0
+	for _, x := range xs {
+		if x > 0 {
+			sum += x
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return sum / n
 }

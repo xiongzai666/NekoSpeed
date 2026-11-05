@@ -190,6 +190,10 @@ func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) 
 // extractName 尝试从订阅来源、响应头或内容中提取订阅名称。
 // 名称会经过 sanitizeName 处理，可直接用于文件名前缀；提取不到时返回空字符串。
 func extractName(source string, data []byte, header http.Header) string {
+	lower := strings.ToLower(source)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "file://") {
+		return sanitizeName(filepath.Base(source))
+	}
 	u, err := url.Parse(source)
 	if err == nil {
 		if q := u.Query().Get("name"); q != "" {

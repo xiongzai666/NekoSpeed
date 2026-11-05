@@ -98,6 +98,12 @@ func (u UnlockResult) Label() string {
 		}
 		return "解锁"
 	case StatusPending:
+		if u.Info != "" {
+			return u.Info
+		}
+		if u.Platform == "netflix" {
+			return "仅自制"
+		}
 		return "待解锁"
 	case StatusSentToCN:
 		if u.Region != "" {
@@ -161,7 +167,32 @@ type NodeResult struct {
 	Err      string // 致命错误（节点无法拨号等），非空则其余结果可能缺失
 }
 
-// OK 返回节点是否可用（延迟、测速、拓扑、解锁任一成功）。
+// OK 返回节点是否可用（至少有一项经由代理的测试成功）。
+// 注意：Inbound 仅为本地直连解析服务器域名，不能作为代理节点连通的依据。
 func (r *NodeResult) OK() bool {
-	return r.Err == "" && ((r.Latency != nil && r.Latency.AvgHTTPS > 0) || (r.Speed != nil && r.Speed.Avg > 0) || (r.Inbound != nil && r.Inbound.IP != "") || (r.Outbound != nil && r.Outbound.IP != "") || len(r.Media) > 0 || len(r.AI) > 0)
+	if r.Err != "" {
+		return false
+	}
+	if r.Latency != nil && r.Latency.AvgHTTPS > 0 {
+		return true
+	}
+	if r.Speed != nil && r.Speed.Avg > 0 {
+		return true
+	}
+	if r.Outbound != nil && r.Outbound.IP != "" {
+		return true
+	}
+	if r.NAT != "" && r.NAT != "Unknown" {
+		return true
+	}
+	return hasValidUnlock(r.Media) || hasValidUnlock(r.AI)
+}
+
+func hasValidUnlock(list []UnlockResult) bool {
+	for _, u := range list {
+		if u.Status != "" && u.Status != StatusReqFailed && u.Status != StatusNA {
+			return true
+		}
+	}
+	return false
 }

@@ -62,6 +62,7 @@ var mediaCheckers = []Checker{
 	checkerFunc{"bahamut", checkBahamut},
 	checkerFunc{"steam", checkSteam},
 	checkerFunc{"spotify", checkSpotify},
+	checkerFunc{"tiktok", checkTikTok},
 }
 
 // aiCheckers AI 平台固定顺序。

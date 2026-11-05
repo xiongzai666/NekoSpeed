@@ -11,10 +11,15 @@ import (
 	"strconv"
 
 	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 
 	"nekospeed/internal/model"
 )
+
+func init() {
+	resolver.DisableIPv6 = false
+}
 
 // UDPProxyDialer 在 model.Dialer 之上暴露 UDP 能力（tester.NAT 等需要）。
 // NewDialer 返回的 dialer 必然实现本接口，可安全做类型断言；

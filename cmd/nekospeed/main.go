@@ -7,13 +7,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
+
+	"github.com/metacubex/mihomo/component/resolver"
 
 	"nekospeed/internal/runner"
 	"nekospeed/internal/webui"
 )
 
 func main() {
+	resolver.DisableIPv6 = false
 	var (
 		source      = flag.String("sub", "", "订阅链接或本地文件路径（Clash YAML 或分享链接订阅）")
 		config      = flag.String("config", "", "本地 Clash 配置文件路径（等价于 -sub 的本地文件）")
@@ -21,8 +25,12 @@ func main() {
 		threads     = flag.Int("threads", 8, "测速线程数（1-32）")
 		duration    = flag.Int("duration", 10, "测速时长秒（1-30）")
 		single      = flag.Bool("single", false, "单线程测速（等价于 -threads 1）")
-		filter      = flag.String("filter", "", "节点名过滤正则")
-		concurrency = flag.Int("concurrency", 1, "同时测试的节点数（默认 1，避免节点间抢带宽）")
+		filter      = flag.String("filter", "", "节点名包含过滤正则（白名单）")
+		exclude     = flag.String("exclude", "", "节点名排除过滤正则（黑名单，如 官网|剩余|倍率）")
+		skipInfo    = flag.Bool("skip-info", true, "自动跳过剩余流量/到期时间/官网等提示类伪节点")
+		sortBy      = flag.String("sort", "", "结果排序方式：留空（订阅原序）、speed（速度降序）、latency（延迟升序）")
+		maxMB       = flag.Int("max-mb", 0, "单节点下载测速最大流量上限 MB（0 表示不限制）")
+		concurrency = flag.Int("concurrency", 6, "同时探测的节点数（下载测速内部自动单节点串行，避免抢带宽）")
 		outDir      = flag.String("o", "out", "输出目录")
 		mmdb        = flag.String("mmdb", "", "MaxMind GeoIP2 mmdb 文件路径（不提供则用在线 API）")
 		fontPath    = flag.String("font", "", "自定义中文字体路径（默认自动探测系统字体）")
@@ -38,6 +46,11 @@ func main() {
 		web         = flag.String("web", "", "启动内嵌 Web UI（如 :18189 或 18189），非空即启用")
 	)
 	flag.Parse()
+
+	// Windows 下直接双击 exe（无命令行参数）时默认启动内嵌 Web UI，避免黑框一闪而过。
+	if runtime.GOOS == "windows" && len(os.Args) == 1 && *web == "" && *source == "" && *config == "" {
+		*web = "127.0.0.1:18189"
+	}
 
 	if *web != "" {
 		addr := *web
@@ -65,9 +78,13 @@ func main() {
 		Duration:    *duration,
 		Concurrency: *concurrency,
 		PingCount:   *pingCount,
-		Single:      *single,
-		Filter:      *filter,
-		OutDir:      *outDir,
+		Single:        *single,
+		Filter:        *filter,
+		Exclude:       *exclude,
+		SkipInfoNodes: *skipInfo,
+		SortBy:        *sortBy,
+		MaxMB:         *maxMB,
+		OutDir:        *outDir,
 		MMDB:        *mmdb,
 		FontPath:    *fontPath,
 		Watermark:   *watermark,
