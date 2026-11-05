@@ -41,9 +41,17 @@
 | 用 VPS 测 | 境外网络无封锁，结果稳定，推荐长期使用 |
 | 向机场反馈 | IP 池中被封 IP 占比高（本例 Oracle 韩国段被移动方向封锁较多） |
 
-### 代码层面待改进（可选）
+### 代码层面已实现的工程防护与改进
 
-1. **错误透传**：把 ping/download 的真实错误记入 `NodeResult.Err` 或日志（如首 N 条），避免"成功 1/1 但数据全 0"的误导
-2. **代理可用性标记**：outbound 查询失败时在 JSON/图中标记 `proxyAlive: false`
-3. **anytls:// 分享链接解析**：`internal/subscription/sharelink.go` 的 `shareSchemes` 未包含 anytls，目前仅支持 Clash YAML 形式的 anytls 节点
-4. `typeDisplayNames` 缺 anytls 映射，节点类型列显示为小写 `anytls`（仅美观问题）
+针对上述问题以及本地代理环境干扰，当前版本已在代码层面内置以下自动化防护机制：
+
+1. **✅ 多公共 DNS 采样 + TCP 预检锁定活 IP（`internal/nodepool/preflight.go`）**：
+   - 测试前并发向阿里（`223.5.5.5`）、腾讯（`119.29.29.29`）、114、Cloudflare、Google 等多组 DNS 发起解析，收集 DDNS 候选 IP 池并执行 TCP 握手探测，自动将节点 `server` 替换为首个可达的真实 IP。
+   - 自动识别并剔除 `198.18.0.0/15`（Clash Fake-IP 段）、回环及链路本地地址，防止 DNS 劫持污染节点入口。
+2. **✅ 自动绑定物理网卡绕过本地 TUN（`internal/nodepool/netbind.go`）**：
+   - 启动时自动探测默认路由对应的真实物理网卡（排除 `Mihomo`、`Meta`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟网卡），并设置 `mihomo` 的 `dialer.DefaultInterface`。
+   - 底层通过 `IP_UNICAST_IF`（Windows）/ `IP_BOUND_IF`（macOS）/ `SO_BINDTODEVICE`（Linux）强制所有节点拨号与预检流量直走物理网卡，彻底解决本地开启 TUN 模式导致的“代理套代理”失真。
+3. **✅ 100% 丢包快速熔断与错误透传（`internal/runner/runner.go` & `internal/tester/latency.go`）**：
+   - 延迟测试全部失败（丢包率 100%）时，将底层真实拨号错误记入 `NodeResult.Err`，并自动跳过后续耗时的下载测速、流媒体/AI 解锁、出口 IP 与 NAT 探测，避免无效等待与“全 0 假成功”。
+4. **✅ 完整支持 `anytls://` 分享链接与协议展示（`internal/subscription/sharelink.go` & `internal/render/render.go`）**：
+   - 支持直接解析 `anytls://` 分享链接（自动提取密码、SNI、ALPN、`insecure`/`skip-cert-verify` 等参数），并在渲染图表中规范显示为 `AnyTLS`。
