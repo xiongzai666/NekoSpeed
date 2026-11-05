@@ -1,13 +1,13 @@
-name: Sync Mihomo & Auto Release
+name: Sync Upstream & Mihomo Auto Release
 
 on:
   schedule:
-    # 每天北京时间 10:00 (02:00 UTC) 自动检查上游 MetaCubeX/mihomo 是否有新 Release
+    # 每天北京时间 10:00 (02:00 UTC) 自动检查上游 KaWaIDeSuNe/NekoSpeed 代码更新与 MetaCubeX/mihomo 新版本
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       force_release:
-        description: '即使 mihomo 无新版本也强制重新构建并发布 Release'
+        description: '即使上游与 mihomo 无更新也强制重新构建并发布 Release'
         required: false
         default: false
         type: boolean
@@ -26,28 +26,51 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check upstream MetaCubeX/mihomo latest release
+      - name: Sync upstream KaWaIDeSuNe/NekoSpeed & check MetaCubeX/mihomo
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_RELEASE: ${{ inputs.force_release }}
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1. 检查并同步上游仓库 KaWaIDeSuNe/NekoSpeed
+          git remote add upstream https://github.com/KaWaIDeSuNe/NekoSpeed.git || true
+          git fetch upstream main
+          UPSTREAM_COUNT=$(git rev-list --count HEAD..upstream/main)
+          echo "New commits in upstream KaWaIDeSuNe/NekoSpeed: $UPSTREAM_COUNT"
+          UPSTREAM_UPDATED="false"
+          if [ "$UPSTREAM_COUNT" -gt 0 ]; then
+            echo "Merging $UPSTREAM_COUNT new commit(s) from upstream/main..."
+            if ! git merge --no-edit upstream/main; then
+              echo "Conflict detected during standard merge, resolving with -X ours to preserve fork enhancements..."
+              git merge --abort || true
+              git merge -X ours --no-edit upstream/main
+            fi
+            UPSTREAM_UPDATED="true"
+          fi
+          echo "upstream_updated=$UPSTREAM_UPDATED" >> "$GITHUB_OUTPUT"
+          echo "upstream_commits=$UPSTREAM_COUNT" >> "$GITHUB_OUTPUT"
+
+          # 2. 检查上游 MetaCubeX/mihomo 最新稳定版 Release
           CURRENT=$(awk '/github.com\/metacubex\/mihomo / {print $2; exit}' go.mod)
           LATEST=$(gh api repos/MetaCubeX/mihomo/releases/latest --jq '.tag_name')
-          echo "Current mihomo version: $CURRENT"
-          echo "Latest upstream mihomo: $LATEST"
+          echo "Current mihomo version in go.mod: $CURRENT"
+          echo "Latest upstream mihomo release: $LATEST"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
 
           if [ "$CURRENT" != "$LATEST" ] && [ -n "$LATEST" ]; then
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          elif [ "$FORCE_RELEASE" = "true" ]; then
-            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "needs_mihomo_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_mihomo_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$UPSTREAM_UPDATED" = "true" ] || { [ "$CURRENT" != "$LATEST" ] && [ -n "$LATEST" ]; } || [ "$FORCE_RELEASE" = "true" ]; then
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           else
-            echo "needs_update=false" >> "$GITHUB_OUTPUT"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -64,8 +87,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk zip
 
-      - name: Upgrade mihomo dependency
-        if: steps.check.outputs.needs_update == 'true'
+      - name: Upgrade mihomo dependency to latest
+        if: steps.check.outputs.needs_mihomo_update == 'true' || steps.check.outputs.upstream_updated == 'true'
         run: |
           LATEST="${{ steps.check.outputs.latest }}"
           go get "github.com/metacubex/mihomo@${LATEST}"
@@ -76,7 +99,7 @@ jobs:
         if: steps.check.outputs.should_release == 'true'
         run: go test -v ./...
 
-      - name: Commit & Tag mihomo update
+      - name: Commit & Push synced changes and compute Release Tag
         id: tag
         if: steps.check.outputs.should_release == 'true'
         run: |
@@ -85,14 +108,13 @@ jobs:
           DATE_STAMP=$(date -u +'%Y.%m.%d')
           TAG_NAME="v${DATE_STAMP}-${LATEST}"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           if [ -n "$(git status --porcelain go.mod go.sum README.md)" ]; then
             git add go.mod go.sum README.md
-            git commit -m "chore(deps): sync mihomo backend to ${LATEST}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git commit -m "chore(sync): sync upstream & bump mihomo backend to ${LATEST}"
           fi
+
+          # 推送合并了上游代码或升级了 mihomo 的主分支
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
           # 若同名 tag 已存在则追加短提交号避免冲突
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
@@ -151,9 +173,10 @@ jobs:
           name: "NekoSpeed ${{ steps.tag.outputs.tag_name }} (mihomo ${{ steps.check.outputs.latest }})"
           generate_release_notes: true
           body: |
-            ### 🚀 自动化构建发布
+            ### 🚀 自动化同步与构建发布
+            - **上游仓库同步**：已同步 [`KaWaIDeSuNe/NekoSpeed`](https://github.com/KaWaIDeSuNe/NekoSpeed) 最新提交（本次新增合并提交数：`${{ steps.check.outputs.upstream_commits }}`）
             - **Mihomo 内核版本**：[`${{ steps.check.outputs.latest }}`](https://github.com/MetaCubeX/mihomo/releases/tag/${{ steps.check.outputs.latest }})
-            - **内置特性**：
+            - **分支增强特性**：
               - 自动识别并绑定物理网卡（Windows `IP_UNICAST_IF` / macOS `IP_BOUND_IF`），自动绕过本地 Clash TUN 与 `198.18.0.0/15` Fake-IP，防止代理套代理
               - 极简双行 WebUI 控制台（支持按需挑节点、实时单节点流式上屏、免重测 0.3s 重绘主题/排序、一键复制图片到剪贴板、导出 CSV）
               - Windows 版支持直接双击 `nekospeed-windows-amd64.exe` 一键启动 WebUI (`http://127.0.0.1:18189`)
