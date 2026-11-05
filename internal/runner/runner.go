@@ -795,6 +795,7 @@ func formatLocalISP(g model.GeoInfo) string {
 	if loc == "" {
 		return ""
 	}
+	loc = strings.TrimSuffix(loc, "市")
 	isp := g.ISP
 	if isp == "" {
 		isp = g.Org

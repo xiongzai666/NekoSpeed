@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -314,5 +315,34 @@ func TestMergeStack(t *testing.T) {
 		if got := mergeStack(c.a, c.b); got != c.want {
 			t.Errorf("mergeStack(%q,%q) = %q, 期望 %q", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+func TestRealDomesticAnhuiTongchengIP(t *testing.T) {
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 目标测试 IP：用户真实安徽安庆桐城 IP
+	targetIP := "120.242.230.110"
+	g := r.Lookup(ctx, targetIP, nil)
+	t.Logf("实测国内 IP 结果: %+v", g)
+
+	if g.Country != "CN" {
+		t.Errorf("期望 Country=CN, 实际得到 %s", g.Country)
+	}
+	if !strings.Contains(g.Region, "安徽") {
+		t.Errorf("期望 Region 包含 '安徽', 实际得到 %s", g.Region)
+	}
+	if !strings.Contains(g.City, "安庆") && !strings.Contains(g.City, "桐城") {
+		t.Errorf("期望 City 包含 '安庆' 或 '桐城', 实际得到 %s", g.City)
+	}
+	if !strings.Contains(g.ISP, "移动") {
+		t.Errorf("期望 ISP 包含 '移动', 实际得到 %s", g.ISP)
 	}
 }
