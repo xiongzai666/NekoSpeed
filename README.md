@@ -252,7 +252,7 @@ internal/
 
 ### mihomo（GPL-3.0）
 
-- 版本：`github.com/metacubex/mihomo v1.19.33`
+- 版本：`github.com/metacubex/mihomo v1.19.34`
 - 用途：`internal/nodepool` 通过 `adapter.ParseProxy` 解析节点配置并作拨号层，支持 mihomo 全部代理协议（anytls 等）
 - 合规：mihomo 以 GPL-3.0 授权，本项目静态链接并整体以 GPL-3.0 开源，即满足 GPL-3.0 的分发义务。分发二进制（CLI / WebUI / Android APK）时请一并提供本仓库源码。
 
