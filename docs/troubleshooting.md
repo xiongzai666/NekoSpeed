@@ -1,57 +1,61 @@
-# NekoSpeed 问题排查记录
+# NekoSpeed 问题排查与工程防护说明
 
-## 案例：anytls 订阅本地测试全部失败（丢包 100%、速度为 0），VPS 正常
+> 返回主文档：[README.md](../README.md)
 
-### 现象
+---
 
-- 订阅：`https://ding.81dlg.com/dongligang/...`（动力港，42 个 anytls 节点）
-- **VPS（境外）**：42/42 成功，速度/延迟/出口全部正常
-- **本地 Mac（中国移动网络）**：所有节点 `packetLoss=1`、`avgHTTPS=0`、速度全 0、`outbound` 为空，但显示"成功"
-- 同一时刻本地 Clash Verge 使用同一订阅也不通（502）
+## 一、 常见问题速查
 
-### 根因
+| 现象 | 常见原因 | 处理方式 |
+|---|---|---|
+| 本地开启 Clash / v2rayN TUN 模式后测速走代理或入口 IP 变成 `198.18.x.x` | 虚拟网卡接管默认路由或本地 DNS 返回 Fake-IP | 检查启动日志是否出现 `已绑定物理网卡`；保持默认 `-preflight=true`（自动过滤 `198.18.0.0/15` 并直绑物理网卡）；若仍异常，排查本地防火墙是否拦截直连物理网卡出站 |
+| 本地家宽归属地显示为英文城市（如 `Wuhu移动`）或仅到市级未到区县 | 纯真 CZ88 免登录每日限额耗尽（`code: 5101`）或国内接口临时不可达，回退至国际 IPv6 库 | 正常现象，内置 3 分钟源冷却机制会在当前轮次跳过限额源并依次尝试百度大数据 / 太平洋电脑网 / `api.ip.sb` / `ip-api.com`；也可在 Web UI 或通过 `-bandwidth "安庆桐城移动@1Gbps"` 手动指定标题前缀 |
+| 部分节点 `丢包 100%`、延迟与速度全为 0，但在境外 VPS 正常 | 机场域名走高频 DDNS 轮换，部分解析 IP 已被网络阻断（见下文案例复盘） | 保持 `-preflight=true` 自动锁定存活 IP；或重跑重试、换用境外机器测试 |
+| Windows / Android 渲染 PNG 报告中文显示方块或失败 | 精简系统或定制 ROM（如 HyperOS）魔改系统字体导致 OpenType 解析报错 | 使用 `-font <字体文件路径>` 手动指定 `NotoSansCJKsc-Regular.otf` 或系统 `msyh.ttc`；Android APK 已内置思源黑体自动兜底 |
+| 局域网访问 Web UI 提示输入令牌，或 HTTP 下点击“复制图片”失败 | 启动了 `-web-token` / `NEKOSPEED_WEB_TOKEN`，或非 HTTPS 环境下浏览器限制 `ClipboardItem` API | 在弹窗输入对应令牌（或 URL 追加 `?token=...`）；非安全上下文下前端会自动提示下载 PNG 替代写入剪贴板 |
 
-**机场使用 DDNS 高频轮换服务器 IP 抗封锁，IP 池中部分旧 IP 已被 GFW 封死。本地测试成败取决于"解析那一刻轮到的 IP 是否还活着"。**
+---
 
-证据链：
+## 二、 典型案例复盘：DDNS 轮换封锁导致 `anytls` 订阅本地全挂
 
-1. 节点配置正常：`type: anytls`、`sni: jd.com`、`skip-cert-verify: true`，mihomo **v1.19.27+** 已支持 anytls（v1.19.29 验证可用）
-2. 失败时临时加调试日志可见真实错误：
-   ```
-   failed to create session: dial tcp 168.107.10.200:51401: operation was canceled
-   ```
-3. `nc`/`ping` 验证该 IP **全端口 + ICMP 均不可达**；`traceroute` 死在中国移动国际出口（`223.120.x`）—— 典型 GFW 国际出口封 IP
-4. 域名是 DDNS 链：`dlg-hk.dlg365.com → trans8888-all.trans8888.com → ddnsXXX.woaitutu520.com → A 记录`，**TTL 仅 5 秒**，IP 在 Oracle Cloud 池内不断更换
-5. Go 解析器复现：多次查询返回死/活 IP 混合列表，mihomo `ResolveIPv4` 从列表中**随机选取**（`randv2.IntN`），选中死 IP 即全挂
-6. IP 轮换到活 IP（如 `168.107.53.107`）后立即重测 → 延迟 172 ms、速度 15.6 MB/s、出口香港，**完全正常**
-7. VPS 从不失败：境外无封锁，池中所有 IP 均可达
+### 1. 现象
 
-### 关键排查手法
+- **测试对象**：某包含 42 个 `anytls` 节点的订阅。
+- **境外 VPS**：42/42 全部测试成功，延迟、速度与落地出口正常。
+- **本地宽带（中国移动）**：所有节点均出现 `packetLoss=1`、`avgHTTPS=0`、速度为 0、`outbound` 为空，但旧版未感知失败错误而仍标记为“成功”；同时本地客户端使用该订阅亦无法连通（502）。
 
-- `inbound`（入口 IP）**只是本地 DNS 解析 + 直连查询**，不经过代理，有值不代表代理工作；判断代理是否真通看 **`outbound`（出口 IP）是否为空**（`internal/geo/geoip.go:184-200`，outbound 失败静默返回 nil）
-- NekoSpeed 对拨号错误完全静默：`latency.go` 只计数丢包、`speed.go` 直接吞错、`geoip.go` outbound 失败无输出。排查时需临时在 `internal/nodepool/pool.go` 的 `proxyDialer.DialContext` 加 `fmt.Fprintf(os.Stderr, ...)` 打印真实错误
-- 本机若开着 Clash Verge 等 TUN 代理先排除干扰（本次 TUN 实际未接管路由，utun 无地址无路由表项，`route -n get <ip>` 确认走物理网卡）
+### 2. 排查与根因
 
-### 解决方案
+**节点域名使用 TTL 极短（5 秒）的 DDNS 链高频轮换池内 IP，其中部分服务器 IP 已被国际出口阻断；本地能否测通取决于 DNS 解析瞬间轮到的 IP 是否仍存活。**
 
-| 方案 | 说明 |
-|---|---|
-| **直接重跑** | 最简单。TTL 5 秒，重跑时大概率换到活 IP（本次就是这么通的） |
-| 临时钉 hosts | `sudo sh -c 'echo "168.107.53.107 dlg-hk.dlg365.com" >> /etc/hosts'`，用完即删（IP 随时失效） |
-| 用 VPS 测 | 境外网络无封锁，结果稳定，推荐长期使用 |
-| 向机场反馈 | IP 池中被封 IP 占比高（本例 Oracle 韩国段被移动方向封锁较多） |
+关键证据链：
 
-### 代码层面已实现的工程防护与改进
+1. 节点配置本身正常（`type: anytls`、`skip-cert-verify: true`，`mihomo` **v1.19.27+** 已支持 `anytls`）。
+2. 底层拨号报错为 `failed to create session: dial tcp <pool-ip>:51401: operation was canceled`。
+3. 对该 pool-ip 执行 `nc` / `ping` 显示全端口与 ICMP 不可达，`traceroute` 止步于运营商国际出口；而同一 DDNS 域名随后轮换到另一存活 IP 时，测速立刻恢复（延迟 `172 ms`、速度 `15.6 MB/s`、出口归属正常）。
+4. 早期 Go 解析器与 `mihomo` 默认解析从 IP 列表中随机选取，一旦抽中死 IP 即整体失败；境外服务器无入口封锁，因此从不触发。
 
-针对上述问题以及本地代理环境干扰，当前版本已在代码层面内置以下自动化防护机制：
+### 3. 排查经验与手工应急
 
-1. **多公共 DNS 采样 + TCP 预检锁定活 IP（`internal/nodepool/preflight.go`）**：
-   - 测试前并发向阿里（`223.5.5.5`）、腾讯（`119.29.29.29`）、114、Cloudflare、Google 等多组 DNS 发起解析，收集 DDNS 候选 IP 池并执行 TCP 握手探测，自动将节点 `server` 替换为首个可达的真实 IP。
-   - 自动识别并剔除 `198.18.0.0/15`（Clash Fake-IP 段）、回环及链路本地地址，防止 DNS 劫持污染节点入口。
-2. **自动绑定物理网卡绕过本地 TUN（`internal/nodepool/netbind.go`）**：
-   - 启动时自动探测默认路由对应的真实物理网卡（排除 `Mihomo`、`Meta`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟网卡），并设置 `mihomo` 的 `dialer.DefaultInterface`。
-   - 底层通过 `IP_UNICAST_IF`（Windows）/ `IP_BOUND_IF`（macOS）/ `SO_BINDTODEVICE`（Linux）强制所有节点拨号与预检流量直走物理网卡，彻底解决本地开启 TUN 模式导致的“代理套代理”失真。
-3. **100% 丢包快速熔断与错误透传（`internal/runner/runner.go` & `internal/tester/latency.go`）**：
-   - 延迟测试全部失败（丢包率 100%）时，将底层真实拨号错误记入 `NodeResult.Err`，并自动跳过后续耗时的下载测速、流媒体/AI 解锁、出口 IP 与 NAT 探测，避免无效等待与“全 0 假成功”。
-4. **完整支持 `anytls://` 分享链接与协议展示（`internal/subscription/sharelink.go` & `internal/render/render.go`）**：
-   - 支持直接解析 `anytls://` 分享链接（自动提取密码、SNI、ALPN、`insecure`/`skip-cert-verify` 等参数），并在渲染图表中规范显示为 `AnyTLS`。
+- `inbound`（入口 IP）依赖直连查询与节点域名解析，有值不代表代理通道可用；**判断代理链路是否真实通畅应看延迟成功与否及 `outbound`（落地 IP）**。
+- 当未修代码时，重跑等待 DDNS 换到新 IP、临时写 `/etc/hosts` 绑定确认存活的 IP，或改在境外 VPS 测试是最快手段（新版已通过 `-preflight` 自动化解决）。
+
+---
+
+## 三、 代码层面已实现的工程防护机制
+
+针对上述案例及常见生产环境问题，仓库当前已内置五项防护：
+
+1. **多公共 DNS 采样 + TCP 预检锁定活 IP（`internal/nodepool/preflight.go`）**
+   - 测试前并发向阿里（`223.5.5.5`）、腾讯（`119.29.29.29`）、114、Cloudflare、Google 等公共 DNS 解析节点域名，对候选 IP 池逐一执行 TCP 握手探活，自动钉住首个可达的真实 IP。
+   - 自动识别并剔除 `198.18.0.0/15`（Fake-IP 段）、回环与链路本地地址。
+2. **物理网卡自动绑定绕过本地 TUN（`internal/nodepool/netbind.go`）**
+   - 自动识别默认路由所属真实物理网卡（排除 `Mihomo`、`Meta`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟网卡），注入 `mihomo` 的 `dialer.DefaultInterface`。
+   - 底层经 `IP_UNICAST_IF`（Windows）/ `IP_BOUND_IF`（macOS）/ `SO_BINDTODEVICE`（Linux）强制预检与拨号直连物理出口。
+3. **100% 丢包快速熔断与错误透传（`internal/runner/runner.go` & `internal/tester/latency.go`）**
+   - 节点全部延迟测试失败时，保留真实拨号错误信息至 `NodeResult.Err`，并跳过下载测速、流媒体/AI 解锁、拓扑与 NAT 探测，避免无意义超时等待。
+4. **多源 GeoIP 精度、GBK 兼容、ASN 补全与源冷却（`internal/geo/geoip.go`）**
+   - 本机公网归属先经太平洋电脑网（GBK 自动转码）获取公网 IPv4，再传给纯真 CZ88（带区县精度并过滤 `"市辖区"`）与百度大数据（省市拆分），解决空参数调纯真/百度固定失败及 GBK 乱码问题。
+   - 为直连 GeoIP 源引入 3 分钟失败冷却（区分网络/限额异常与“非中国大陆”正常拒绝），并在国内库缺少数字 `ASN` 或精简 `-mmdb` 缺字段时短超时在线补全；代理出口先走 Cloudflare Trace 锁定真实落地与机房码，再以 `5s` 单步 / `20s` 总预算容灾回退。
+5. **完整支持 `anytls://` 分享链接与规范渲染（`internal/subscription/sharelink.go` & `internal/render/render.go`）**
+   - 直接解析 `anytls://` 链接中的密码、SNI、ALPN、`insecure`/`skip-cert-verify` 参数，并在报告图中显示为 `AnyTLS`。

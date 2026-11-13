@@ -213,22 +213,22 @@ echo "桌面端产物在 dist/"
 1. 引入 `fyne.io/fyne/v2` 依赖。
 2. 创建 `cmd/nekospeed-desktop/main.go`，初始化 Fyne App 和主窗口。
 3. 实现输入页：订阅、测试项、参数、主题切换。
-4. 实现日志/运行页： goroutine 调用 `runner.Run`，实时回调更新 UI。
+4. 实现日志/运行页：goroutine 调用 `runner.Run`，实时回调更新 UI。
 5. 实现结果页：节点列表、速度、解锁矩阵、拓扑、图片查看。
 6. 实现文件导出：JSON/PNG 保存对话框。
 7. 编写 `scripts/build-desktop.sh` 构建 Windows / macOS 产物。
 8. 测试并打包 `.exe` 和 `.app`。
 
-## 11. 与 Android 客户端对比
+## 11. 与 Android 客户端及内嵌 Web UI 对比
 
-| 维度 | Android | 桌面端（Fyne） |
-|---|---|---|
-| 技术栈 | Kotlin + Jetpack Compose | Go + Fyne |
-| 调用方式 | 嵌入 NekoSpeed 二进制，ProcessBuilder 执行 | 直接 import `internal/runner` 调用 |
-| 是否需要子进程 | 是 | 否 |
-| 是否需要 WebView | 否 | 否 |
-| 结果解析 | 解析 JSON | 直接拿到 Go 结构体 |
+| 维度 | Android | 原生桌面端（Fyne 规划） | 内嵌 Web UI（已实现） |
+|---|---|---|---|
+| 技术栈 | Kotlin + Jetpack Compose | Go + Fyne | Go `net/http` + 原生 JS/CSS（`go:embed`） |
+| 调用方式 | 嵌入二进制，ProcessBuilder 执行 | 直接 `import internal/runner` | 直接调用 `internal/runner`，SSE 推送状态 |
+| 独立子进程 | 是 | 否 | 否 |
+| 依赖浏览器/WebView | 否 | 否 | 使用本机系统浏览器 |
+| 当前状态 | 已实现，源码位于 `android/` | 规划阶段（`cmd/nekospeed-desktop` 尚未创建） | 随主程序一同发布（`-web` 或 Windows 双击启动） |
 
 ---
 
-> 仅供学习研究使用，请勿用于违反当地法律法规的场景。
+> 仅供学习研究使用，请勿用于违反当地法律法规的场景。返回 [README.md](../README.md)。

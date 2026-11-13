@@ -203,7 +203,7 @@ cd android
 ./gradlew assembleDebug
 ```
 
-> 更多开发阶段与真机验证细节见 [docs/android-progress.md](android-progress.md)。
+> 更多开发阶段与真机验证细节见 [Android 实施进度](android-progress.md)，主仓库说明见 [README.md](../README.md)。
 
 ## 9. 注意事项
 

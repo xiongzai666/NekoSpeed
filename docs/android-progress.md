@@ -1,5 +1,7 @@
 # NekoSpeed Android 客户端 — 实施进度
 
+> **文档说明**：本文档记录 Android 客户端从零搭建到 `v0.2.0` 发布及后续加固的开发里程碑；架构设计与构建方式概览见 [android-client.md](android-client.md)，返回主文档见 [README.md](../README.md)。
+
 ## 1. 项目概述
 
 为 NekoSpeed 打造 Android 原生 GUI。架构：预编译 Go 二进制嵌入 APK assets → ProcessBuilder 调用 → 解析 result.json → Jetpack Compose 渲染。
@@ -183,6 +185,11 @@ android/
 - [x] R8 冒烟：模拟器安装 release APK（签名不同需先卸载 debug）→ 启动/InputScreen/历史页序列化全部正常
 - [ ] 待办：keystore 文件+密码异地备份（丢失则无法升级覆盖已装 App）；真机安装 release 自测
 
+### 后续加固（2026-11）：Runner 取消与输入状态稳健性
+- [x] `NekoSpeedRunner`：优化进程取消与临时输入文件清理逻辑，避免并发或快速重启残留
+- [x] `InputScreen` / `RunViewModel`：完善 URL 与粘贴模式切换时的状态重置，避免旧状态串扰
+- [x] `ResultDto` & `NekoSpeedService`：补强 JSON DTO 容错解析与单元测试（`ResultDtoTest.kt`），加固前台服务生命周期处理
+
 ## 5. 关键决策记录
 
 | 决策 | 选择 | 理由 |
@@ -257,7 +264,7 @@ android/
 
 ## 8. 参考
 
-- `docs/android-client.md` — 产品需求与技术方案
-- `internal/report/json.go` — JSON 输出结构定义
-- `internal/model/model.go` — 核心数据模型
-- `scripts/build.sh` — 编译入口（待扩展 Android 目标）
+- [android-client.md](android-client.md) — 产品需求与技术方案
+- [internal/report/json.go](../internal/report/json.go) — JSON 输出结构定义
+- [internal/model/model.go](../internal/model/model.go) — 核心数据模型
+- [scripts/build.sh](../scripts/build.sh) — 桌面端及 Android 双架构交叉编译与字体下载入口

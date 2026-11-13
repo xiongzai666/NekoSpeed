@@ -1,6 +1,6 @@
 # NekoSpeed Android 客户端 — Phase 0-1 实施计划
 
-> 制定日期：2026-07-28。范围经确认：仅 Phase 0（正确性修复）+ Phase 1（构建工具链 + 可编译 APK），完整 UI 留待 Session 2。
+> **归档说明**：本文档为 2026-07-28 制定的 Phase 0-1 首期实施计划，对应任务均已落地。最新架构说明见 [android-client.md](android-client.md)，完整进度日志见 [android-progress.md](android-progress.md)，返回主文档见 [README.md](../README.md)。
 
 **目标**：修复全部阻塞性正确性问题，补齐构建工具链，产出可在 Android Studio 一次编译成功的 APK 项目（UI 占位，完整 UI 下个 Session）。
 

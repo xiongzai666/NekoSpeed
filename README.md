@@ -4,7 +4,7 @@
 
 # NekoSpeed
 
-机场（代理订阅）测速工具。参考 [miaospeed](https://github.com/AirportR/miaospeed) 架构（mihomo 内核作拨号层），输入订阅链接或 Clash 配置，一次性跑完测试并输出 MiaoKo 风格的 PNG 结果图 + JSON。
+机场（代理订阅）批量测速与检测工具。基于 [mihomo](https://github.com/MetaCubeX/mihomo) 内核拨号，支持一键输出 MiaoKo 风格 PNG 结果图与结构化 JSON，并提供零外部依赖的内嵌 Web UI 与原生 Android 客户端。
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
@@ -15,288 +15,248 @@
 
 </div>
 
-> 本项目以 **GPL-3.0** 开源。因核心依赖 [mihomo](https://github.com/MetaCubeX/mihomo)（GPL-3.0）静态链接进二进制，本项目整体遵循 GPL-3.0 授权。详见 [LICENSE](LICENSE) 与[开源与合规](#开源与合规)章节。
+> 本仓库基于 [KaWaIDeSuNe/NekoSpeed](https://github.com/KaWaIDeSuNe/NekoSpeed) 持续维护，重点扩展了模块化内嵌 Web UI、接口访问令牌鉴权（`-web-token`）、物理网卡自动绑定（防本地 TUN 干扰）、高精度多源 GeoIP 识别与冷却机制、深色高对比度主题渲染，以及每日自动同步上游与 `mihomo` 内核的 GitHub Actions 发布流水线。
 >
-> 本仓库基于上游 [KaWaIDeSuNe/NekoSpeed](https://github.com/KaWaIDeSuNe/NekoSpeed) 持续维护，新增模块化内嵌 Web UI、接口访问令牌鉴权（`-web-token`）、自动绑定物理网卡防 TUN 干扰、深色高对比度主题渲染，以及每日自动同步上游与 `mihomo` 内核的 GitHub Actions 发布流水线。
+> **开源协议**：因核心依赖 `mihomo`（GPL-3.0）静态编译进产物，本项目整体遵循 **GPL-3.0** 协议开源（见 [LICENSE](LICENSE)）。
+
+---
 
 ## 目录
 
-- [功能](#功能)
-- [用法](#用法)
-- [参数](#参数)
-- [支持的订阅格式](#支持的订阅格式)
-- [输出](#输出)
-- [构建](#构建)
-- [Windows 部署](#windows-部署)
-- [自动化同步与构建 (GitHub Actions)](#自动化同步与构建-github-actions)
+- [核心特性](#核心特性)
+- [快速开始](#快速开始)
+- [内嵌 Web UI 指南](#内嵌-web-ui-指南)
+- [CLI 用法与参数参考](#cli-用法与参数参考)
+- [输出产物与主题](#输出产物与主题)
+- [核心工程机制](#核心工程机制)
 - [Android 客户端](#android-客户端)
-- [相关文档](#相关文档)
-- [架构](#架构)
-- [开源与合规](#开源与合规)
-- [说明](#说明)
+- [GitHub Actions 自动化流水线](#github-actions-自动化流水线)
+- [仓库结构与文档索引](#仓库结构与文档索引)
+- [开源协议与第三方合规](#开源协议与第三方合规)
 
 ---
 
-## 功能
+## 核心特性
 
-- **测速**：多/单线程下载测速（每秒速度序列、平均、峰值、单节点最大流量上限 `-max-mb`）、TLS RTT、HTTPS 延迟（httptrace 精确计时，TLS1.3）
-- **并发探测与下载串行保护**：支持多节点并发（默认 `-concurrency 6`）同时探测延迟、流媒体/AI 解锁、拓扑与 NAT，而大流量下载测速通过独立信号量自动串行执行，兼顾筛查效率与带宽准确性
-- **本地网络标注**：自动探测本机公网 IP 的运营商/城市，并在测速图/综合图标题显示（如 `上海电信@1Gbps`），可手动指定带宽（如 `1Gbps`）或完整标题前缀（如 `上海电信@1Gbps`）
-- **流媒体解锁**：YouTube / Netflix / Disney+ / B站港澳台 / TikTok / DAZN / Abema / 巴哈姆特 / Steam 货币 / Spotify
-- **AI 解锁**：ChatGPT (OpenAI) / Copilot / Gemini / MetaAI / Claude / Perplexity / Sora / Grok
-- **线路分析**：入口（节点服务器 IP 归属）/ 出口（落地 IP 归属）聚合表，GeoLite2 mmdb 或在线 API
-- **UDP NAT 类型**：STUN（RFC 5780）检测 FullCone / Restricted / PortRestricted / Symmetric
-- **内嵌 Web UI**：`-web`（或 Windows 下直接双击 `nekospeed.exe`）一键启动浏览器操作台，静态前端资源通过 `go:embed` 内嵌在单文件二进制中：
-  - **三模式订阅输入**：使用分段切换器分别输入订阅链接（URL）、本地文件路径（支持 `.yaml` / `.txt` 拖拽上传）或直接粘贴多行分享链接 / Clash YAML；切换订阅来源时，自动清理非手动锁定的订阅名称，避免沿用旧前缀。
-  - **测前挑节点**：测试前直接解析订阅并列出节点，支持关键词搜索、一键排除高倍率节点以及按需勾选待测节点。
-  - **节流流式看板**：通过 SSE（`event: node`）实时推送单节点结果，前端按动画帧合批刷新表格并保留最近 1500 行运行日志，动态计算可用节点数、峰值速度、累计流量与预计剩余时间（ETA）。
-  - **免重测即时重绘与历史回看**：测试完成后无需重新探测网络，即可切换浅色 / 深色主题、调整排序、修改水印或带宽标题重绘全套 PNG；顶部固定历史记录条与空态引导方便快速回看历史报告。
-  - **访问控制与导出分享**：支持 `-web-token` / `NEKOSPEED_WEB_TOKEN` 令牌保护（浏览器弹出 401 鉴权对话框并自动附加请求头；监听非回环地址且未设令牌时会打印安全警告），支持一键复制高清 PNG 到剪贴板（含 HTTP 场景兼容回退）、导出 UTF-8 BOM CSV 表格与下载 JSON。
-- **自动绑定物理网卡（防 TUN 代理套代理）**：自动探测本机默认路由对应的真实物理网卡并注入 mihomo `dialer.DefaultInterface`（底层 `IP_UNICAST_IF` / `IP_BOUND_IF` / `SO_BINDTODEVICE`），配合多公共 DNS 预检自动过滤 `198.18.0.0/15` Fake-IP，即使本机开启 Clash / V2rayN TUN 模式也能直连节点真实入口
-- **IP 预检**：多公共 DNS 采样节点服务器 IP + TCP 探测，锁定当前可达 IP，避免 DDNS 轮换 IP 池中被封锁的死 IP 导致整节点失败
-- **智能过滤与排序**：默认自动跳过“剩余流量 / 套餐到期 / 官网”等提示类伪节点（`-skip-info`），支持正则白名单（`-filter`）、黑名单（`-exclude`）及按速度/延迟排序（`-sort`）
-- **输出文件名**：自动从订阅 URL/文件/内容中提取订阅名称，作为输出文件前缀（如 `xx机场_20260724_105252_speed.png`），也可用 `-name` 手动指定
-- **多款主题**：内置 `default`（经典玫瑰粉，无背景花纹）、`sky_light`（经典浅蓝，无背景花纹）、14 款柔和浅色主题与 4 款高对比度深色主题（`nord_dark` / `tokyo_dark` / `forest_dark` / `sunset_dark`），可通过 `-theme` 指定或设为 `random` 随机
+- **吞吐与延迟测速**：支持多线程 / 单线程下载测速（每秒速度序列、平均速度、峰值速度、单节点流量上限 `-max-mb`）、TLS RTT 与 HTTPS 延迟测量（基于 `httptrace` 精确计时）。
+- **并发探测与下载串行保护**：延迟、流媒体/AI 解锁、拓扑与 NAT 支持多节点并发探测（默认 `-concurrency 6`）；大流量下载测速通过独立信号量自动串行执行，兼顾整体耗时与带宽测试准确度。
+- **流媒体解锁检测（10 项）**：YouTube、Netflix、Disney+、B 站港澳台、DAZN、Abema、巴哈姆特、Steam、Spotify、TikTok。
+- **AI 服务可用性检测（8 项）**：OpenAI (ChatGPT)、Copilot、Gemini、Llama (MetaAI)、Claude、Perplexity、Sora、Grok。
+- **入口 / 出口拓扑分析**：直连探测节点入口 IP 与代理实测落地真实 IP（Cloudflare Trace + 多源 GeoIP / 本地 MMDB），按接入簇聚合并输出入口 / 出口拓扑表。
+- **UDP NAT 类型探测**：基于 STUN（RFC 5780）识别 `FullCone`、`Restricted`、`PortRestricted`、`Symmetric`。
+- **智能过滤与命名**：自动跳过“剩余流量 / 套餐到期 / 官网 / 重置”等提示类伪节点（`-skip-info`），支持正则白名单（`-filter`）与黑名单（`-exclude`），并自动提取订阅名称作为文件名前缀。
+- **21 款渲染主题**：包含 `default`、16 款无底纹浅色色相主题与 4 款深色高对比度主题，文字颜色随底色亮度自动反白或深灰适配。
 
 ---
 
-## 用法
+## 快速开始
+
+### 方式一：下载预编译产物（推荐）
+
+前往 [GitHub Releases](https://github.com/xiongzai666/NekoSpeed/releases) 下载对应平台单文件二进制或归档包（含 `SHA256SUMS.txt` 校验）：
+
+- **Windows**：直接双击 `nekospeed-windows-amd64.exe`（无命令行参数时自动在 `http://127.0.0.1:18189` 启动内嵌 Web UI 并打开默认浏览器）；也可在 PowerShell / CMD 中通过 CLI 运行。
+- **macOS / Linux**：解压后赋予可执行权限（`chmod +x nekospeed-*`），在终端执行 `-web` 或 CLI 命令。
+
+### 方式二：从源码构建
+
+需要 **Go 1.25+**（`go.mod` 当前依赖 `github.com/metacubex/mihomo v1.19.34`）：
 
 ```bash
-# Windows 下直接双击 nekospeed.exe 或命令行启用内嵌 Web UI（推荐）
-./nekospeed -web 127.0.0.1:18189
-
-# 全量测试（速度+流媒体+AI+线路+NAT）
-./nekospeed -sub "https://example.com/sub" -o out/
-
-# 只测速度，按平均速度降序排列，排除倍率节点
-./nekospeed -sub "https://example.com/sub" -tests speed -sort speed -exclude "2x|3x|倍率"
-
-# 本地 Clash 配置 + 过滤节点 + 通过本地代理拉取订阅 + GeoIP 数据库
-./nekospeed -config clash.yaml -tests speed,media -filter "香港|日本" -proxy "http://127.0.0.1:7890" -mmdb GeoLite2-ASN.mmdb
-```
-
-## 参数
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `-sub` | - | 订阅链接或本地文件（Clash YAML 或分享链接订阅，自动识别） |
-| `-config` | - | 本地 Clash 配置文件（等价 `-sub` 本地文件） |
-| `-proxy` | - | 拉取订阅时使用的 HTTP/SOCKS5 代理（如 `http://127.0.0.1:7890`，不影响节点测速直连） |
-| `-tests` | `all` | 逗号分隔：`speed,media,ai,topo,nat` 或 `all` |
-| `-threads` | `8` | 测速下载线程数（1-32） |
-| `-duration` | `10` | 单节点测速时长（秒，1-30） |
-| `-max-mb` | `0` | 单节点下载测速最大流量上限（MB，`0` 为不限制） |
-| `-single` | `false` | 单线程测速（等价 `-threads 1`） |
-| `-filter` | - | 节点名保留正则（白名单） |
-| `-exclude` | - | 节点名排除正则（黑名单，如 `倍率\|到期\|官网`） |
-| `-skip-info` | `true` | 自动跳过“剩余流量/套餐到期/官网/重置”等提示类伪节点 |
-| `-sort` | 原序 | 结果排序方式：`speed`（按平均速度降序）、`latency`（按延迟升序）、留空保持订阅原序 |
-| `-concurrency` | `6` | 同时测试的节点数（延迟/解锁/拓扑并发执行，大流量下载测速内部自动串行防抢占带宽） |
-| `-o` | `out` | 输出目录 |
-| `-mmdb` | - | MaxMind GeoIP2 mmdb 路径（不给则用 ip-api.com / ipinfo.io） |
-| `-font` | - | 自定义中文字体路径（默认自动探测系统雅黑 / 黑体 / PingFang / Noto CJK） |
-| `-watermark` | 无 | 图片水印文字（默认无水印） |
-| `-bandwidth` | 自动 | 本地带宽或标题后缀（如 `1Gbps` 或 `上海电信@1Gbps`），未指定时取所有节点测速峰值折算 |
-| `-name` | 自动 | 订阅名称，用于输出文件名前缀与图片标题（覆盖自动提取） |
-| `-theme` | `default` | 渲染主题，如 `default`（经典粉）/ `sky_light`（经典蓝）/ `mint_light` / `nord_dark` / `random` |
-| `-speed-url` | - | 自定义测速文件 URL（默认 Cloudflare / Google 大文件） |
-| `-ping-url` | `http://www.gstatic.com/generate_204` | 延迟测试地址 |
-| `-ping-count` | `4` | 每节点延迟测试次数 |
-| `-preflight` | `true` | 测试前多公共 DNS 采样服务器 IP 并 TCP 探测，锁定可达真实 IP（过滤 Fake-IP 与被封死 IP） |
-| `-web` | - | 启动内嵌 Web UI（如 `127.0.0.1:18189` 或 `:18189`；Windows 下无参数双击自动以此模式启动） |
-| `-web-token` | `NEKOSPEED_WEB_TOKEN` | Web UI 访问令牌（非空时对 `/api/*` 与 `/files/*` 启用鉴权，支持 Bearer、`X-NekoSpeed-Token` 与 `?token=`） |
-
-## 支持的订阅格式
-
-- Clash / Mihomo YAML（`proxies:` 列表），支持 `anytls`、`hysteria2`、`tuic`、`vless` 等 mihomo 全部协议
-- 分享链接订阅（base64 或明文逐行）：`ss://` `ssr://` `vmess://` `vless://` `trojan://` `hysteria2://`/`hy2://` `tuic://` `anytls://` `snell://`
-
-## 输出
-
-输出目录下按时间戳生成：
-
-| 文件 | 说明 |
-|---|---|
-| `*_speed.png` | 测速图（延迟色块、平均/最高速度、每秒速度迷你柱状图、UDP 类型） |
-| `*_media.png` | 流媒体解锁图 |
-| `*_ai.png` | AI 可用性检测图 |
-| `*_full.png` | 综合图（测速 + 解锁合并宽图，选 speed 且选 media/ai 时生成） |
-| `*_topology.png` | 线路分析图（入口/出口表，选 topo 时生成） |
-| `*_result.json` | 全部原始数据（延迟序列、每秒速度、解锁状态、GeoIP、NAT） |
-
-## 排障
-
-本地测试出现“全部节点丢包 100%、速度为 0”或 DDNS 轮换死 IP 问题时，请参考[问题排查记录与工程防护说明](docs/troubleshooting.md)。
-
----
-
-## 构建
-
-需要 Go 1.25+（因依赖 `mihomo v1.19.34`）：
-
-```bash
+# 仅构建当前平台二进制
 go build -o nekospeed ./cmd/nekospeed
-```
 
-### 跨平台编译（含 Windows / macOS / Linux）
-
-```bash
+# 交叉编译桌面全平台（Windows / macOS / Linux）及 Android（需配置 NDK）
 ./scripts/build.sh
 ```
 
-产物在 `dist/`：`nekospeed-windows-amd64.exe`、`nekospeed-windows-arm64.exe`、`nekospeed-darwin-amd64`、`nekospeed-darwin-arm64`、`nekospeed-linux-amd64`、`nekospeed-linux-arm64`。
-
-## Windows 部署
-
-**方式一（直接下载预编译版，推荐）**：前往 [GitHub Releases](https://github.com/xiongzai666/NekoSpeed/releases) 下载 `nekospeed-windows-amd64.exe`（或压缩包 `nekospeed-windows-amd64.zip`），**单文件零依赖、无需安装任何运行库**。
-
-**方式二（本机源码构建）**：安装 [Go for Windows](https://go.dev/dl/) 后在 PowerShell 执行：
-
-```powershell
-go build -o nekospeed.exe ./cmd/nekospeed
-```
-
-命令行使用（PowerShell / CMD 均可）：
-
-```powershell
-.\nekospeed.exe -sub "https://example.com/sub" -o out
-.\nekospeed.exe -sub "https://example.com/sub" -tests speed -sort speed
-```
-
-### Windows 部署与使用内嵌 Web UI
-
-Web UI 静态前端（`internal/webui/static/*`）通过 `go:embed` 内嵌在单文件二进制中，无需任何外部静态文件：
-
-- **直接双击启动**：在 Windows 资源管理器中直接双击 `nekospeed.exe`（或 `nekospeed-windows-amd64.exe`），程序将在 `http://127.0.0.1:18189` 启动内嵌 Web UI 并自动打开系统默认浏览器。
-- **命令行指定端口或局域网监听**：
-
-  ```powershell
-  # 仅本机访问（默认）
-  .\nekospeed-windows-amd64.exe -web 127.0.0.1:18189
-
-  # 监听局域网或远程访问时，建议设置 -web-token 启用鉴权
-  .\nekospeed-windows-amd64.exe -web 0.0.0.0:18189 -web-token "your-secret-token"
-  ```
-
-- **Web UI 核心工作流**：
-  1. **选择订阅来源**：通过「订阅链接 / 本地文件 / 粘贴内容」分段切换器输入订阅 URL、拖拽上传 `.yaml` / `.txt`，或直接粘贴多行节点。切换不同来源或更换订阅链接时，若订阅名称未手动锁定，将自动清空并重新识别。
-  2. **按需挑节点**：测试前点击「挑节点」弹窗解析节点列表，支持关键词搜索、排除高倍率节点与逐项勾选。
-  3. **实时流式看板**：测试过程中每个节点完成后即实时刷新表格，同步统计可用数、最高速度、累计消耗流量与预计剩余时间（ETA）。
-  4. **免重测即时重绘**：测试完成后无需重新测速，即可更换浅色 / 深色主题、排序方式、自定义水印或带宽标题（如 `1Gbps` 或 `上海电信@1Gbps`）重新生成全套 PNG。
-  5. **导出与历史回看**：支持复制高清 PNG 到系统剪贴板、导出 CSV、下载 JSON，以及通过页面顶部历史记录条随时回看、切换或删除历史报告。
-
-**Windows 注意事项：**
-
-- **字体自适应**：自动按 `%WINDIR%\Fonts`（兼容非 C 盘系统）与 `%LOCALAPPDATA%\Microsoft\Windows\Fonts` 探测微软雅黑（`msyh.ttc` / `msyh.ttf`）、黑体（`simhei.ttf`）、等线（`Deng.ttf`）及新宋体（`simsun.ttc`），覆盖 Windows 7 ~ Windows 11 及精简版系统；如需自定义字体可用 `-font` 指定。
-- **TUN 模式自动绕过**：程序启动时会自动探测本机默认路由对应的真实物理网卡并绑定出站（控制台输出 `🛡️ 已绑定物理网卡: <网卡名>`），同时在预检阶段过滤 `198.18.0.0/15` Fake-IP。即使本机开着 Clash Verge / Clash Nyanpasu / v2rayN 的 TUN 模式，也无需手动关闭即可直连测速。
-- **安全与防火墙提示**：结果图默认写入 `out\` 目录（Web UI 模式保存在 `out\web\<时间戳>\`）。监听非回环地址（如 `0.0.0.0`）且未配置 `-web-token` / `NEKOSPEED_WEB_TOKEN` 时，终端会输出安全警告；Windows 防火墙首次弹窗请允许访问。
+跨平台产物默认输出至 `dist/` 目录，包含 `windows-amd64`、`windows-arm64`、`darwin-amd64`、`darwin-arm64`、`linux-amd64`、`linux-arm64`。
 
 ---
 
-## 自动化同步与构建 (GitHub Actions)
+## 内嵌 Web UI 指南
 
-本仓库配置了完整的 CI/CD 自动化工作流（位于 `.github/workflows/`）：
+内嵌 Web UI 的前端资源（`internal/webui/static/` 中的 `index.html`、`app.css`、`app.js`）通过 `go:embed` 直接打包进单文件可执行程序，无需部署额外静态目录。
 
-1. **[Sync Upstream & Mihomo Auto Release](.github/workflows/sync-mihomo.yml)**：
-   - **触发方式**：每日定时（UTC `02:00` / 北京时间 `10:00`）自动巡检，或通过 Actions 页面手动触发 `Run workflow`（支持勾选 `force_release` 强制基于最新状态发版）。
-   - **上游同步机制**：自动拉取上游 `KaWaIDeSuNe/NekoSpeed` 的 `main` 分支并尝试快进或合并；若存在文件冲突，工作流会中止自动合并，并将分支推送到 `sync/upstream-main` 后自动创建 Pull Request 供人工审核处理，避免静默覆盖本地改动。
-   - **自动升级 `mihomo` 内核**：自动查询 `MetaCubeX/mihomo` 最新正式版 Release Tag，执行 `go get` 与 `go mod tidy` 升级内核；通过全套单元测试与 6 平台交叉编译验证后，自动推送代码并打上版本标签（格式：`v<YYYY.MM.DD>-<mihomo_tag>`）。
-2. **[CI & Tag Release](.github/workflows/ci-release.yml)**：
-   - **触发方式**：推送到 `main` 分支、提交 Pull Request、推送 `v*` 标签或手动触发。
-   - **多平台产物发布**：运行全量 Go 单元测试并交叉编译 `windows-amd64`、`windows-arm64`、`darwin-amd64`、`darwin-arm64`、`linux-amd64`、`linux-arm64` 共 6 个平台的单文件二进制，打包 `.zip` / `.tar.gz` 归档及 `SHA256SUMS.txt` 校验文件发布至 [GitHub Releases](https://github.com/xiongzai666/NekoSpeed/releases)。
+### 启动与访问控制
+
+```bash
+# 仅本机回环访问（默认）
+./nekospeed -web 127.0.0.1:18189
+
+# 监听局域网或远程端口时，建议配置 -web-token（或环境变量 NEKOSPEED_WEB_TOKEN）开启鉴权
+./nekospeed -web 0.0.0.0:18189 -web-token "your-secret-token"
+```
+
+> **安全说明**：监听非回环地址（如 `0.0.0.0`）且未设置 `-web-token` / `NEKOSPEED_WEB_TOKEN` 时，控制台会输出安全警告。开启令牌后，所有 `/api/*` 与 `/files/*` 请求均需携带 `Authorization: Bearer <token>`、`X-NekoSpeed-Token`、`?token=` 或登录 Cookie；浏览器首次访问遇 `401` 时会自动弹出令牌输入框并保存在本地会话中。
+
+### 操作工作流
+
+1. **三模式订阅输入**：通过顶部「订阅链接 / 本地文件 / 粘贴内容」分段切换器导入订阅，支持直接拖拽 `.yaml` / `.txt` 文件或粘贴多行节点；切换订阅来源或替换 URL 时，未手动锁定的订阅名称会自动重置并重新识别。
+2. **测前挑节点**：点击「挑节点」即可在不触发测速的情况下预览全部节点，支持关键词搜索、一键排除倍率节点以及按需勾选目标节点。
+3. **节流流式看板**：测试期间通过 SSE（`event: node`）实时推送单节点结果，前端按动画帧合批刷新表格并维护最近 1500 行终端日志，动态展示可用节点数、最高峰值速度、累计流量与预计剩余时间（ETA）。
+4. **免重测即时重绘**：测完后无需重新发起网络请求，可直接更换配色主题、排序规则、自定义水印或带宽标题前缀（例如 `1Gbps` 或 `上海电信@1Gbps`）重新渲染并覆盖/保存全套 PNG。
+5. **导出与历史回看**：支持一键复制高清 PNG 到剪贴板（含非 HTTPS 环境兼容回退）、导出 UTF-8 BOM CSV、下载 JSON，以及在顶部历史记录条随时切换查看或删除过往报告（保存在 `out/web/<时间戳>/`）。
+
+---
+
+## CLI 用法与参数参考
+
+### 常用命令示例
+
+```bash
+# 全量测试（测速 + 流媒体 + AI + 拓扑 + NAT）
+./nekospeed -sub "https://example.com/sub" -o out/
+
+# 仅测速并按平均速度降序排序，排除倍率节点
+./nekospeed -sub "https://example.com/sub" -tests speed -sort speed -exclude "2x|3x|倍率"
+
+# 使用本地 Clash 配置 + 过滤地区 + 走代理拉取订阅 + 指定离线 GeoIP 数据库
+./nekospeed -config clash.yaml -tests speed,media -filter "香港|日本" -proxy "http://127.0.0.1:7890" -mmdb GeoLite2-ASN.mmdb
+```
+
+### 全部参数（`cmd/nekospeed/main.go`）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-sub` | - | 订阅链接或本地文件路径（自动识别 Clash YAML 或分享链接） |
+| `-config` | - | 本地 Clash 配置文件路径（等价于 `-sub` 本地文件） |
+| `-proxy` | 环境变量 `HTTPS_PROXY` | 拉取订阅时使用的 HTTP/SOCKS5 代理（如 `http://127.0.0.1:7890`，不影响测速直连） |
+| `-tests` | `all` | 测试项，逗号分隔：`speed,media,ai,topo,nat` 或 `all` |
+| `-threads` | `8` | 测速下载并发线程数（`1-32`） |
+| `-duration` | `10` | 单节点测速时长（秒，`1-30`） |
+| `-max-mb` | `0` | 单节点下载测速流量上限（MB，`0` 表示不限制） |
+| `-single` | `false` | 单线程测速（等价于 `-threads 1`） |
+| `-filter` | - | 节点名白名单正则 |
+| `-exclude` | - | 节点名黑名单正则（如 `倍率\|到期\|官网`） |
+| `-skip-info` | `true` | 自动跳过“剩余流量 / 到期时间 / 官网”等提示类伪节点 |
+| `-sort` | 保持订阅原序 | 结果排序方式：`speed`（平均速度降序）、`latency`（延迟升序）、留空保持原序 |
+| `-concurrency` | `6` | 并发探测的节点数（下载测速内部受独立信号量保护，单节点串行执行） |
+| `-o` | `out` | 输出目录 |
+| `-mmdb` | - | MaxMind MMDB 路径（支持 City / ASN / Country 等库，缺失字段在线补全） |
+| `-font` | 自动探测 | 自定义中文字体路径（Windows 探测 `%WINDIR%\Fonts` 等，跨平台自动匹配系统字体） |
+| `-watermark` | 无 | 图片水印文字 |
+| `-bandwidth` | 自动折算 | 本地带宽或标题后缀（如 `1Gbps` 或 `上海电信@1Gbps`），未指定时按峰值折算 |
+| `-name` | 自动提取 | 覆盖自动提取的订阅名称，用于文件名前缀与图片标题 |
+| `-theme` | `default` | 渲染主题名（如 `default`、`sky_light`、`nord_dark` 等，见下文清单） |
+| `-speed-url` | 内置大文件 | 自定义下载测速文件 URL（默认 Cloudflare / Google 大文件） |
+| `-ping-url` | `http://www.gstatic.com/generate_204` | HTTPS/TLS 延迟测试地址 |
+| `-ping-count` | `4` | 每节点延迟测试次数 |
+| `-preflight` | `true` | 测试前采样多公共 DNS 并 TCP 探活，锁定可用服务器 IP 并过滤 Fake-IP |
+| `-web` | - | 启动内嵌 Web UI 并指定监听地址（如 `127.0.0.1:18189` 或 `:18189`） |
+| `-web-token` | 环境变量 `NEKOSPEED_WEB_TOKEN` | Web UI 接口鉴权令牌；非空时保护 `/api/*` 与 `/files/*` |
+
+### 支持的订阅格式
+
+- **Clash / Mihomo YAML**：标准 `proxies:` 节点列表，支持 `mihomo` 全系协议。
+- **分享链接订阅（Base64 编码或纯文本逐行）**：`ss://`、`ssr://`、`vmess://`、`vless://`、`trojan://`、`hysteria://` / `hy://`、`hysteria2://` / `hy2://`、`tuic://`、`anytls://`、`snell://`。
+
+---
+
+## 输出产物与主题
+
+每次测试会在输出目录下按 `<订阅名>_<YYYYMMDD_HHMMSS>_*`（未提取到订阅名时按 `<YYYYMMDD_HHMMSS>_*`）生成以下文件：
+
+| 文件名 | 内容说明 |
+|---|---|
+| `*_speed.png` | 测速结果图（延迟色块、平均/峰值速度、每秒速度迷你柱状图、UDP NAT 类型） |
+| `*_media.png` | 10 项流媒体平台解锁矩阵图 |
+| `*_ai.png` | 8 项 AI 平台可用性检测矩阵图 |
+| `*_full.png` | 综合宽图（同时开启 `speed` 与 `media`/`ai` 时生成） |
+| `*_topology.png` | 入口 / 出口拓扑聚合表（开启 `topo` 时生成） |
+| `*_result.json` | 完整结构化测试结果（用于归档、`ReRender` 重绘或 Android/第三方消费） |
+
+**内置 21 款主题**：
+- **经典默认**：`default`
+- **浅色系（16 款）**：`rose_light`、`peach_light`、`amber_light`、`yellow_light`、`lime_light`、`green_light`、`mint_light`、`teal_light`、`cyan_light`、`sky_light`、`azure_light`、`blue_light`、`indigo_light`、`violet_light`、`purple_light`、`pink_light`
+- **深色系（4 款）**：`nord_dark`、`tokyo_dark`、`forest_dark`、`sunset_dark`
+
+---
+
+## 核心工程机制
+
+针对国内网络环境与本地代理干扰，程序在运行时默认启用以下防护（排查思路与真实案例详见 [问题排查与防护机制](docs/troubleshooting.md)）：
+
+1. **物理网卡自动绑定（防 TUN 套代理）**：自动扫描系统默认路由对应的物理网卡（过滤 `Mihomo`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟接口），通过 `dialer.DefaultInterface` 直绑物理网卡发送测速与预检流量。
+2. **多公共 DNS + TCP 预检**：并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 `198.18.0.0/15` Fake-IP 并对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
+3. **高精度本地与节点 GeoIP 链**：
+   - **本机网络归属**：优先由太平洋电脑网（自适应 GBK 转码）取得公网 IPv4，再传给纯真 CZ88（精确到区县级并过滤 `"市辖区"`）或百度大数据（省市拆分）解析中文简称（如 `安庆桐城移动`）。
+   - **节点入口 / 出口**：直连数据源内置 3 分钟失败冷却防止不可达或限额接口逐节点空等超时；国内库缺失数字 ASN 时自动以 2 秒短超时从 `ip-api.com` / `api.ip.sb` 补全；代理出口优先通过 Cloudflare Trace 测定真实落地 IP 与机房三字码，`-mmdb` 缺少城市或 ASN 时自动在线补全。
+4. **100% 丢包快速熔断**：延迟探测全部失败时记录真实底层错误并跳过后续测速、解锁与拓扑探测，避免无效等待和“全 0 假成功”。
 
 ---
 
 ## Android 客户端
 
-Android 原生客户端（Jetpack Compose + 预编译 Go 二进制），源码位于 `android/`，桌面端预编译二进制发布在 [GitHub Releases](https://github.com/xiongzai666/NekoSpeed/releases)（上游 Android APK 可参见 [上游 Releases](https://github.com/KaWaIDeSuNe/NekoSpeed/releases)）。
+`android/` 目录提供基于 Jetpack Compose + Material 3 的原生 Android 客户端，内部嵌入交叉编译后的 Go 二进制与中文字体，实现离线包内一键调用与结果渲染：
 
-- **功能**：订阅测速（URL / 粘贴内容）、五项测试（测速/流媒体/AI/拓扑/NAT）、节点/解锁/拓扑/图片四 Tab 报告、报告图预览与保存相册、历史记录（自动归档可查看/删除）、前台服务保活、VPN 冲突检测
-- **适配**：arm64 / amd64 双架构；内置 NotoSansCJKsc 中文字体（厂商 ROM 如 HyperOS 魔改系统字体时兜底）；兼容 Android 14+ SELinux（经 `linker64` 执行）
-- **隐私**：订阅 URL 落盘后以文件路径传给二进制，订阅 token 不暴露于进程命令行；订阅解析失败日志脱敏
-- **构建**：
+- **主要特性**：支持订阅 URL / 粘贴内容双输入、5 项测试全覆盖、`Node / Unlock / Topology / Images` 四 Tab 报告、PNG 保存至系统相册与分享、历史归档管理、前台服务（`NekoSpeedService`）保活与通知栏取消、VPN 冲突检测。
+- **兼容性**：覆盖 `arm64` / `amd64` 双架构（Go 二进制经 gzip 压缩至约 10 MB），内置 `NotoSansCJKsc-Regular.otf` 兜底厂商 ROM 字体兼容问题，并在 Android 14+ SELinux 限制下自动通过 `/system/bin/linker64` 拉起二进制。
+- **常用构建命令**：
 
-  ```bash
-  ./scripts/build.sh          # 交叉编译 arm64/amd64 二进制 → assets（含字体下载）
-  cd android
-  ./gradlew assembleDebug     # 调试版
-  ./gradlew assembleRelease   # 正式版（需 android/keystore.properties 签名配置）
-  ```
+```bash
+./scripts/build.sh            # 交叉编译并压缩 Android arm64/amd64 二进制，自动下载内置字体
+cd android
+./gradlew assembleDebug       # 构建调试版 APK
+./gradlew assembleRelease     # 构建正式版 APK（需自备 android/keystore.properties）
+```
 
-- **签名**：正式版需自备 keystore（生成后务必备份，丢失将无法升级覆盖已安装版本）
-
----
-
-## 相关文档
-
-- [问题排查记录与工程防护说明](docs/troubleshooting.md)：DDNS 轮换封锁排查、TUN 模式干扰绕过、预检与快速熔断机制详解
-- [Android 客户端开发文档](docs/android-client.md) 与[实施进度](docs/android-progress.md)
-- [桌面端原生客户端技术方案（规划中）](docs/desktop-client.md)
+> 详细架构与开发记录见 [Android 客户端开发文档](docs/android-client.md) 和 [Android 实施进度](docs/android-progress.md)。
 
 ---
 
-## 架构
+## GitHub Actions 自动化流水线
+
+工作流配置位于 `.github/workflows/`：
+
+1. **[Sync Upstream & Mihomo Auto Release](.github/workflows/sync-mihomo.yml)**：
+   - 每日 UTC `02:00`（北京时间 `10:00`）定时检查，亦支持在 Actions 页面通过 `Run workflow` 手动触发（可选 `force_release` 强制基于当前代码重发版）。
+   - 自动拉取上游 `KaWaIDeSuNe/NekoSpeed` 的 `main` 分支：可快进/无冲突则直接合并；若存在文件冲突，则中止合并并将上游提交推至 `sync/upstream-main` 自动创建 PR，防止覆盖本地改进。
+   - 查询 `MetaCubeX/mihomo` 最新正式版 Tag 并更新依赖，运行全量单测与 6 平台交叉编译后自动发布至 Releases；若同 UTC 日期已有同名 Tag，自动追加短提交号（如 `v2026.11.13-v1.19.34-<sha>`）避免冲突。
+2. **[CI & Tag Release](.github/workflows/ci-release.yml)**：
+   - 监听 `main` 分支推送、PR、手动触发与 `v*` 标签推送，执行全量单元测试并在打标签或手动发布时构建多平台压缩包与 `SHA256SUMS.txt`。
+
+---
+
+## 仓库结构与文档索引
 
 ```text
-cmd/nekospeed     CLI 与 Web UI 入口编排（Windows 双击自动启动 Web UI）
-internal/
-  runner          测试全流程编排、并发控制与免重测重绘（ReRender）
-  webui           内嵌 Web UI 服务端（net/http、SSE 流式推送、令牌鉴权）与 static/ 模块化前端
-  subscription    订阅拉取、多源回退、智能识别与分享链接解析（含 anytls:// 等）
-  nodepool        mihomo adapter.ParseProxy 拨号封装 + 物理网卡自动绑定 + 多 DNS 预检防 Fake-IP
-  tester          延迟（httptrace）/ 下载测速（独立信号量串行保护 + 流量上限）/ STUN NAT
-  unlock          流媒体与 AI 平台解锁检测
-  geo             GeoIP（mmdb / 在线 API 并发缓存）与出入口聚合、本机 ISP 识别
-  render          PNG 表格图手绘引擎（x/image，支持浅色花纹主题与深色高对比度自适应文字）
-  report          JSON 报告序列化与读取
-  model           共享数据结构
-android/          Jetpack Compose 原生 Android 客户端工程
+NekoSpeed/
+├── cmd/nekospeed/                 # CLI 参数解析与 Web UI 入口（Windows 无参双击自启 Web UI）
+├── internal/
+│   ├── runner/                    # 测试编排、并发与串行信号量控制、ReRender 重绘、标题格式化
+│   ├── webui/                     # Web UI HTTP 服务端、SSE 推送、令牌鉴权与 static/ 前端资源
+│   ├── subscription/              # 订阅拉取、重试/HTTP1.1 降级、Clash YAML 与分享链接解析
+│   ├── nodepool/                  # mihomo 代理封装、物理网卡自动绑定、多 DNS 预检防 Fake-IP
+│   ├── tester/                    # 延迟（httptrace）、下载测速与 STUN NAT 类型探测
+│   ├── unlock/                    # 流媒体（10 项）与 AI 服务（8 项）解锁检测
+│   ├── geo/                       # 本地与节点 GeoIP（纯真/百度/太平洋/CF Trace/国际源/MMDB）及拓扑聚合
+│   ├── render/                    # 纯 Go PNG 报告渲染引擎（21 款主题、系统字体自适应）
+│   ├── report/                    # JSON 报告持久化与契约校验
+│   └── model/                     # 共享数据模型与拨号器抽象
+├── android/                       # Android Jetpack Compose 客户端工程
+├── scripts/                       # build.sh（全平台及 Android 二进制构建）与 package.sh
+├── .github/workflows/             # CI 测试、上游/mihomo 同步与多平台发布工作流
+└── docs/
+    ├── troubleshooting.md         # 常见故障排查与核心工程防护说明
+    ├── android-client.md          # Android 客户端架构、构建与模块说明
+    ├── android-progress.md        # Android 各阶段实施进度与真机测试记录
+    └── desktop-client.md          # 原生桌面客户端（Fyne）技术规划方案（未实现）
 ```
 
 ---
 
-## 开源与合规
+## 开源协议与第三方合规
 
-本项目以 **GPL-3.0** 发布（见 [LICENSE](LICENSE)），以下为第三方依赖与数据的合规说明：
+本项目整体遵循 **GPL-3.0**（见 [LICENSE](LICENSE)）。分发 CLI、Web UI 或 Android APK 二进制产物时，须一并提供本仓库对应源码。
 
-### mihomo（GPL-3.0）
-
-- 版本：`github.com/metacubex/mihomo v1.19.34`
-- 用途：`internal/nodepool` 通过 `adapter.ParseProxy` 解析节点配置并作拨号层，支持 mihomo 全部代理协议（anytls 等）
-- 合规：mihomo 以 GPL-3.0 授权，本项目静态链接并整体以 GPL-3.0 开源，即满足 GPL-3.0 的分发义务。分发二进制（CLI / WebUI / Android APK）时请一并提供本仓库源码。
-
-### 中文字体（SIL OFL 1.1）
-
-- Android 客户端内置 `NotoSansCJKsc-Regular.otf`（思源黑体，Google Noto CJK 项目）
-- 许可：[SIL Open Font License 1.1](https://openfontlicense.org/)，允许自由使用、修改与再分发（再分发需保留许可声明）
-- 用途：厂商 ROM 系统字体（如 HyperOS）可能无法被正确解析时，经 `-font` 参数兜底渲染报告图
-
-### GeoIP 数据与在线 API
-
-- `GeoLite2` mmdb 数据库（如使用）：MaxMind 要求署名，[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)，需保留 MaxMind 版权声明
-- 在线查询（未提供 mmdb 时）：`ip-api.com`（非商业用途免费）、`ipinfo.io`（免费版需按条款署名），请自行确认各自使用条款
-
-### 其他第三方依赖
-
-均为宽松许可，按各自 LICENSE 要求保留版权声明：
-
-| 依赖 | 许可 |
+| 组件 / 数据 | 许可 / 用途说明 |
 |---|---|
-| `golang.org/x/image` | BSD-3-Clause |
-| `github.com/miekg/dns` | BSD-3-Clause |
-| `gopkg.in/yaml.v3` | MIT |
-| `github.com/pion/stun` | MIT |
-| `github.com/oschwald/maxminddb-golang` | MIT |
-| Android：Compose / Navigation / Coil 等 | Apache-2.0 |
+| `github.com/metacubex/mihomo` (`v1.19.34`) | GPL-3.0；节点协议解析与底层拨号（静态链接，决定本仓主协议） |
+| `NotoSansCJKsc-Regular.otf`（Android 内置） | SIL Open Font License 1.1；厂商 ROM 字体异常时的 PNG 渲染兜底 |
+| `golang.org/x/image`、`golang.org/x/text`、`github.com/miekg/dns` | BSD-3-Clause；图像渲染、GBK 转码与多源 DNS 解析 |
+| `gopkg.in/yaml.v3`、`github.com/pion/stun`、`github.com/oschwald/maxminddb-golang` | MIT；YAML 配置、STUN NAT 探测与 MMDB 读取 |
+| Android 端（Compose / Navigation / Coil / Coroutines 等） | Apache-2.0 |
+| GeoIP 数据库与在线接口 | 使用 `GeoLite2` mmdb 需遵循 MaxMind CC BY-SA 4.0 署名要求；未提供 mmdb 时默认请求纯真 CZ88、百度大数据、太平洋电脑网、Cloudflare Trace、`ip-api.com`、`api.ip.sb`、`ipwho.is`、`ipinfo.io` 等公开服务，请注意各自非商业/限频条款 |
 
-### 免责声明
-
-- 本项目仅供网络质量测试与学习交流，请遵守所在地区法律法规与机场服务条款
-- 测速与解锁检测基于各平台公开页面特征，结果仅供参考，平台改版可能导致检测项失效
-
----
-
-## 说明
-
-- 测速与解锁结果受本地网络、节点负载影响，仅供参考。
+**免责声明**：本项目仅用于网络质量测试与学习研究，请遵守当地法律法规与服务商条款；测速及解锁结果受本地网络、节点负载与第三方平台策略变更影响，仅供参考。
