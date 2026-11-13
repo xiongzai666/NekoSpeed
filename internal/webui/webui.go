@@ -4,9 +4,14 @@ package webui
 
 import (
 	"context"
-	_ "embed"
+	"crypto/sha256"
+	"crypto/subtle"
+	"embed"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -26,12 +31,31 @@ import (
 	"nekospeed/internal/subscription"
 )
 
-//go:embed static/index.html
-var indexHTML []byte
+const (
+	maxUploadJSONBytes = 16 << 20
+	maxUploadFiles     = 30
+	maxUploadAge       = 24 * time.Hour
+	maxHubHistory      = 4000
+	tokenCookieName    = "nekospeed_token"
+)
+
+var (
+	stampSuffixRe      = regexp.MustCompile(`_\d{8}_\d{6}$`)
+	inlineNamePrefixRe = regexp.MustCompile(`^([0-9a-f]{16}_|\d{8}_\d{6})`)
+)
+
+//go:embed static/*
+var staticFS embed.FS
 
 // Serve 在 addr 上启动 Web UI HTTP 服务并阻塞，直到服务出错。
-// 启动后自动尝试打开浏览器，失败仅打印 URL。
+// 若环境变量 NEKOSPEED_WEB_TOKEN 非空，则自动启用访问令牌保护。
 func Serve(addr string) error {
+	return ServeWithToken(addr, os.Getenv("NEKOSPEED_WEB_TOKEN"))
+}
+
+// ServeWithToken 在 addr 上启动带可选访问令牌保护的 Web UI 服务。
+// 启动后自动尝试打开浏览器，失败仅打印 URL。
+func ServeWithToken(addr, token string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("监听 %s 失败: %w", addr, err)
@@ -40,9 +64,43 @@ func Serve(addr string) error {
 	// 启动时预探测一次物理网卡与本地 TUN 环境，供前端顶栏展示。
 	nodepool.RefreshNetworkEnv()
 
-	s := &server{hub: newHub()}
+	token = strings.TrimSpace(token)
+	s := &server{hub: newHub(), token: token}
+
+	bindHost, port, splitErr := net.SplitHostPort(ln.Addr().String())
+	if splitErr == nil && token == "" && !isLoopbackBindHost(bindHost) {
+		fmt.Fprintf(os.Stderr, "安全警告：Web UI 正在非回环地址 %s 监听且未设置访问令牌，建议通过 -web-token 或 NEKOSPEED_WEB_TOKEN 开启鉴权\n", ln.Addr().String())
+	}
+	displayHost := bindHost
+	if splitErr != nil || displayHost == "" || displayHost == "0.0.0.0" || displayHost == "::" {
+		if port == "" {
+			port = strings.TrimPrefix(addr, ":")
+		}
+		displayHost = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(displayHost, port)
+	if token != "" {
+		fmt.Printf("Web UI 已启动：%s （已启用令牌鉴权，支持 Header 或 ?token=...）\n", url)
+	} else {
+		fmt.Printf("Web UI 已启动：%s\n", url)
+	}
+	openBrowser(url)
+
+	return http.Serve(ln, s.handler())
+}
+
+func isLoopbackBindHost(host string) bool {
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /static/", s.handleStatic)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("POST /api/preview", s.handlePreview)
 	mux.HandleFunc("POST /api/run", s.handleRun)
@@ -53,23 +111,64 @@ func Serve(addr string) error {
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /files/{name}", s.handleFiles)
 	mux.HandleFunc("GET /files/{run}/{name}", s.handleHistoryFiles)
+	return s.withAuth(mux)
+}
 
-	host, port, splitErr := net.SplitHostPort(ln.Addr().String())
-	if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" {
-		if port == "" {
-			port = strings.TrimPrefix(addr, ":")
-		}
-		host = "127.0.0.1"
+func (s *server) withAuth(next http.Handler) http.Handler {
+	if s.token == "" {
+		return next
 	}
-	url := "http://" + net.JoinHostPort(host, port)
-	fmt.Printf("Web UI 已启动：%s\n", url)
-	openBrowser(url)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			if q := strings.TrimSpace(r.URL.Query().Get("token")); subtle.ConstantTimeCompare([]byte(q), []byte(s.token)) == 1 {
+				http.SetCookie(w, &http.Cookie{
+					Name:     tokenCookieName,
+					Value:    s.token,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/files/") {
+			if !s.authorized(r) {
+				http.Error(w, "未授权：缺少或无效的访问令牌", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
-	return http.Serve(ln, mux)
+func (s *server) authorized(r *http.Request) bool {
+	if s.token == "" {
+		return true
+	}
+	match := func(cand string) bool {
+		return subtle.ConstantTimeCompare([]byte(cand), []byte(s.token)) == 1
+	}
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+		if match(strings.TrimSpace(auth[7:])) {
+			return true
+		}
+	}
+	if hdr := strings.TrimSpace(r.Header.Get("X-NekoSpeed-Token")); hdr != "" && match(hdr) {
+		return true
+	}
+	if q := strings.TrimSpace(r.URL.Query().Get("token")); q != "" && match(q) {
+		return true
+	}
+	if c, err := r.Cookie(tokenCookieName); err == nil && match(c.Value) {
+		return true
+	}
+	return false
 }
 
 type server struct {
-	hub *hub
+	hub   *hub
+	token string
 
 	mu        sync.Mutex
 	running   bool
@@ -187,8 +286,24 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	data, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "前端资源加载失败", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(indexHTML)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		http.Error(w, "静态资源不可用", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	http.StripPrefix("/static/", http.FileServerFS(sub)).ServeHTTP(w, r)
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +328,22 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// materializeInlineSource 将前端上传或粘贴的订阅内容落盘到 out/uploads/，返回本地文件路径与推断名称。
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadJSONBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "请求体过大（上限 16 MiB）", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "请求体不是合法 JSON", http.StatusBadRequest)
+		}
+		return false
+	}
+	return true
+}
+
+// materializeInlineSource 将前端上传或粘贴的订阅内容按内容哈希去重落盘到 out/uploads/，
+// 同时清理超过保留期或数量上限的历史临时上传，返回本地文件路径与推断名称。
 func materializeInlineSource(source, content, filename string) (string, string, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -229,12 +359,58 @@ func materializeInlineSource(source, content, filename string) (string, string, 
 	}
 	base = filepath.Base(base)
 	inferred := strings.TrimSuffix(base, filepath.Ext(base))
-	safeName := fmt.Sprintf("%s_%s", time.Now().Format("20060102_150405"), sanitizeName(base))
+	sum := sha256.Sum256([]byte(content))
+	hashPrefix := hex.EncodeToString(sum[:8])
+	safeName := fmt.Sprintf("%s_%s", hashPrefix, sanitizeName(base))
 	dst := filepath.Join(uploadDir, safeName)
-	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
-		return "", "", fmt.Errorf("保存上传内容失败: %w", err)
+	now := time.Now()
+	if _, err := os.Stat(dst); err == nil {
+		_ = os.Chtimes(dst, now, now)
+	} else {
+		if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
+			return "", "", fmt.Errorf("保存上传内容失败: %w", err)
+		}
 	}
+	pruneUploads(uploadDir, dst, now)
 	return dst, inferred, nil
+}
+
+func pruneUploads(dir, keepPath string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type item struct {
+		path string
+		mod  time.Time
+	}
+	var kept []item
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if p == keepPath {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > maxUploadAge {
+			_ = os.Remove(p)
+			continue
+		}
+		kept = append(kept, item{path: p, mod: info.ModTime()})
+	}
+	if len(kept) >= maxUploadFiles {
+		sort.Slice(kept, func(i, j int) bool {
+			return kept[i].mod.After(kept[j].mod)
+		})
+		for i := maxUploadFiles - 1; i < len(kept); i++ {
+			_ = os.Remove(kept[i].path)
+		}
+	}
 }
 
 func sanitizeName(s string) string {
@@ -255,8 +431,7 @@ func sanitizeName(s string) string {
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	var req previewRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "请求体不是合法 JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	source, inferredName, err := materializeInlineSource(req.Source, req.Content, req.Filename)
@@ -277,7 +452,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("解析订阅失败: %v", err), http.StatusBadRequest)
 		return
 	}
-	if subName == "" || strings.HasPrefix(subName, "202") {
+	if subName == "" || inlineNamePrefixRe.MatchString(subName) {
 		if inferredName != "" {
 			subName = inferredName
 		}
@@ -348,8 +523,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleReRender(w http.ResponseWriter, r *http.Request) {
 	var req rerenderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "请求体不是合法 JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	var targetDir string
@@ -393,8 +567,7 @@ func (s *server) handleReRender(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req runRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "请求体不是合法 JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	source, inferredName, err := materializeInlineSource(req.Source, req.Content, req.Filename)
@@ -581,20 +754,26 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if len(files) == 0 {
 			continue
 		}
-		subName := subPrefix
-		if len(subPrefix) > 16 && subPrefix[len(subPrefix)-16] == '_' && subPrefix[len(subPrefix)-7] == '_' {
-			subName = subPrefix[:len(subPrefix)-16]
+		subName := ""
+		if m := stampSuffixRe.FindStringIndex(subPrefix); m != nil {
+			subName = subPrefix[:m[0]]
+		} else if !inlineNamePrefixRe.MatchString(subPrefix) {
+			subName = subPrefix
 		}
 		var total, succeeded int
 		var elapsed string
 		if jsonFile != "" {
 			if raw, err := os.ReadFile(filepath.Join(runDir, jsonFile)); err == nil {
 				var summary struct {
+					SubName   string `json:"subName"`
 					Total     int    `json:"total"`
 					Succeeded int    `json:"succeeded"`
 					Elapsed   string `json:"elapsed"`
 				}
 				if json.Unmarshal(raw, &summary) == nil {
+					if summary.SubName != "" {
+						subName = summary.SubName
+					}
 					total = summary.Total
 					succeeded = summary.Succeeded
 					elapsed = summary.Elapsed
@@ -767,6 +946,11 @@ func (h *hub) done(evt doneEvent) {
 func (h *hub) broadcast(frame string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.history) >= maxHubHistory {
+		trimmed := make([]string, maxHubHistory/2, maxHubHistory)
+		copy(trimmed, h.history[len(h.history)-maxHubHistory/2:])
+		h.history = trimmed
+	}
 	h.history = append(h.history, frame)
 	for ch := range h.subs {
 		select {
