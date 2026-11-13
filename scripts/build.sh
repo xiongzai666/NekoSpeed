@@ -31,24 +31,36 @@ for t in "${targets[@]}"; do
   out="dist/nekospeed-${goos}-${goarch}${ext}"
   echo "==> $out"
   CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-    go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/nekospeed
+    go build -trimpath -ldflags "-s -w -X nekospeed/internal/runner.Version=${VERSION}" -o "$out" ./cmd/nekospeed
 done
 
-ndk_bin="${ANDROID_NDK:-$HOME/Library/Android/sdk/ndk/*/toolchains/llvm/prebuilt/darwin-x86_64/bin}"
-arm64_cc=$(ls $ndk_bin/aarch64-linux-android21-clang 2>/dev/null | head -1)
-amd64_cc=$(ls $ndk_bin/x86_64-linux-android21-clang 2>/dev/null | head -1)
+host_tag="linux-x86_64"
+if [ "$(uname -s)" = "Darwin" ]; then
+  host_tag="darwin-x86_64"
+fi
+sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+ndk_bin="${ANDROID_NDK:-}"
+if [ -z "$ndk_bin" ]; then
+  ndk_bin=$(ls -d "$sdk_root"/ndk/*/toolchains/llvm/prebuilt/"$host_tag"/bin 2>/dev/null | sort -V | tail -1 || true)
+fi
+arm64_cc=""
+amd64_cc=""
+if [ -n "$ndk_bin" ]; then
+  arm64_cc=$(ls "$ndk_bin"/aarch64-linux-android21-clang 2>/dev/null | head -1 || true)
+  amd64_cc=$(ls "$ndk_bin"/x86_64-linux-android21-clang 2>/dev/null | head -1 || true)
+fi
 
 for android_arch in arm64 amd64; do
   android_out="android/app/src/main/assets/nekospeed-android-${android_arch}"
   echo "==> $android_out (raw)"
-  if [ -z "$arm64_cc" ] && [ -z "$amd64_cc" ]; then
-    echo "!! 未找到 NDK clang（aarch64/x86_64-linux-android21-clang），跳过 Android 构建"
+  cc=$([ "$android_arch" = "arm64" ] && echo "$arm64_cc" || echo "$amd64_cc")
+  if [ -z "$cc" ]; then
+    echo "!! 未找到 NDK clang（${android_arch}-linux-android21-clang），跳过 Android 构建"
     continue
   fi
   # 统一走 NDK cgo 动态链接（bionic），适配 Android 14+ SELinux 需经 linker64 执行
-  cc=$([ "$android_arch" = "arm64" ] && echo "$arm64_cc" || echo "$amd64_cc")
   CGO_ENABLED=1 GOOS=android GOARCH=$android_arch CC="$cc" \
-    go build -trimpath -ldflags "-s -w" -o "$android_out" ./cmd/nekospeed
+    go build -trimpath -ldflags "-s -w -X nekospeed/internal/runner.Version=${VERSION}" -o "$android_out" ./cmd/nekospeed
 
   echo "==> $android_out.gz (compressed)"
   gzip -f "$android_out"

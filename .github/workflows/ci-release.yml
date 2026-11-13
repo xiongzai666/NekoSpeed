@@ -54,7 +54,7 @@ jobs:
             out_bin="dist/${bin_name}"
             echo "==> Building ${out_bin}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -trimpath -ldflags "-s -w" -o "$out_bin" ./cmd/nekospeed
+              go build -trimpath -ldflags "-s -w -X nekospeed/internal/runner.Version=${VERSION}" -o "$out_bin" ./cmd/nekospeed
 
             pkg_name="nekospeed_${VERSION}_${goos}-${goarch}"
             stage="dist/.stage/${pkg_name}"
