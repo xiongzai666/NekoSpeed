@@ -62,6 +62,10 @@ func checkOpenAI(ctx context.Context, d model.Dialer) model.UnlockResult {
 
 	ios, err := doGet(ctx, c, openAIIOSURL)
 	if err != nil {
+		// 若 compliance 已明确返回地区不支持，即使后续 ios 探针超时/出错，也应报告地区不支持而非误判为 reqfailed。
+		if countryBlocked {
+			return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区不支持"}
+		}
 		return reqFailed("openai")
 	}
 	vpnBlocked := strings.Contains(strings.ToLower(string(ios.Body)), "vpn")

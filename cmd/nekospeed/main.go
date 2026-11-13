@@ -44,6 +44,7 @@ func main() {
 		theme       = flag.String("theme", "", "渲染主题名称（如 blue_dark），为空时随机选择")
 		proxy       = flag.String("proxy", "", "拉取订阅使用的代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080），默认读取 HTTPS_PROXY 环境变量")
 		web         = flag.String("web", "", "启动内嵌 Web UI（如 :18189 或 18189），非空即启用")
+		webToken    = flag.String("web-token", os.Getenv("NEKOSPEED_WEB_TOKEN"), "Web UI 访问令牌（非空时启用接口鉴权，也可通过 NEKOSPEED_WEB_TOKEN 环境变量设置）")
 	)
 	flag.Parse()
 
@@ -57,7 +58,7 @@ func main() {
 		if !strings.Contains(addr, ":") {
 			addr = ":" + addr
 		}
-		fatalIf(webui.Serve(addr), "Web UI")
+		fatalIf(webui.ServeWithToken(addr, *webToken), "Web UI")
 		return
 	}
 

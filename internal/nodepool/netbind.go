@@ -32,10 +32,6 @@ var (
 	envAt     time.Time
 )
 
-func init() {
-	RefreshNetworkEnv()
-}
-
 // RefreshNetworkEnv 重新探测本机网卡环境，并将真实物理网卡写入 mihomo 的 DefaultInterface，
 // 从而在本地开启 Clash TUN 模式时通过 IP_UNICAST_IF / IP_BOUND_IF / SO_BINDTODEVICE 直接从物理网卡出站，避免代理套代理。
 func RefreshNetworkEnv() NetworkEnv {

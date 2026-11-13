@@ -131,3 +131,46 @@ func TestSpeedBadURLFallback(t *testing.T) {
 		t.Fatal("Speed 在坏 URL 下挂死")
 	}
 }
+
+func TestSpeedWithLimitStopsEarlyAndComputesTrueAvg(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 32*1024)
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+				if _, err := w.Write(buf); err != nil {
+					return
+				}
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	start := time.Now()
+	const capBytes = 1 << 20
+	res := SpeedWithLimit(context.Background(), directDialer(), srv.URL, 2, 8, capBytes)
+	elapsed := time.Since(start)
+
+	if elapsed > 4*time.Second {
+		t.Fatalf("达到流量上限后未提前结束，耗时 %s", elapsed)
+	}
+	if res.Avg <= 0 {
+		t.Fatalf("Avg 应为正值，实际 %v", res.Avg)
+	}
+	if res.Max < res.Avg {
+		t.Fatalf("Max(%v) 不应小于 Avg(%v)", res.Max, res.Avg)
+	}
+	var sum float64
+	for _, v := range res.PerSecond {
+		sum += v
+	}
+	if sum < float64(capBytes) {
+		t.Fatalf("总计字节 (%v) 低于触发上限 %d", sum, capBytes)
+	}
+}

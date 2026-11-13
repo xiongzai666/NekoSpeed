@@ -346,3 +346,86 @@ func TestRealDomesticAnhuiTongchengIP(t *testing.T) {
 		t.Errorf("期望 ISP 包含 '移动', 实际得到 %s", g.ISP)
 	}
 }
+
+func TestDomesticAPIsRejectOverseasIPAsCN(t *testing.T) {
+	baiduSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"0","data":[{"location":"美国 加利福尼亚州","origip":"8.8.8.8"}]}`)
+	}))
+	t.Cleanup(baiduSrv.Close)
+	pcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ip":"8.8.8.8","pro":"","city":"","addr":"美国"}`)
+	}))
+	t.Cleanup(pcSrv.Close)
+
+	oldBaidu, oldPC := baiduBaseURL, pconlineBaseURL
+	baiduBaseURL, pconlineBaseURL = baiduSrv.URL, pcSrv.URL
+	t.Cleanup(func() { baiduBaseURL, pconlineBaseURL = oldBaidu, oldPC })
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	ctx := context.Background()
+	if _, err := r.lookupBaidu(ctx, "8.8.8.8", nil); err == nil {
+		t.Error("海外 IP 不应由 lookupBaidu 误标为 CN")
+	}
+	if _, err := r.lookupPCOnline(ctx, "8.8.8.8", nil); err == nil {
+		t.Error("海外 IP 不应由 lookupPCOnline 误标为 CN")
+	}
+}
+
+func TestResolveOutboundCFTraceSkipsDomesticAndCachesMeta(t *testing.T) {
+	var domesticHits, metaHits atomic.Int32
+	domesticSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		domesticHits.Add(1)
+		http.Error(w, "unexpected domestic call", http.StatusInternalServerError)
+	}))
+	t.Cleanup(domesticSrv.Close)
+
+	cfSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ip=198.51.100.42\nloc=JP\ncolo=NRT\n")
+	}))
+	t.Cleanup(cfSrv.Close)
+
+	whoisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metaHits.Add(1)
+		fmt.Fprint(w, `{"ip":"198.51.100.42","success":true,"country_code":"JP","region":"Tokyo","city":"Tokyo","connection":{"asn":2516,"org":"KDDI","isp":"KDDI CORPORATION"}}`)
+	}))
+	t.Cleanup(whoisSrv.Close)
+
+	oldCZ, oldBD, oldPC, oldCF, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, cfTraceURL, ipwhoisBaseURL
+	cz88BaseURL, baiduBaseURL, pconlineBaseURL = domesticSrv.URL, domesticSrv.URL, domesticSrv.URL
+	cfTraceURL, ipwhoisBaseURL = cfSrv.URL, whoisSrv.URL
+	t.Cleanup(func() {
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL = oldCZ, oldBD, oldPC
+		cfTraceURL, ipwhoisBaseURL = oldCF, oldWhois
+	})
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	dialer := model.DialFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	})
+
+	g1 := r.resolveOutbound(context.Background(), dialer)
+	g2 := r.resolveOutbound(context.Background(), dialer)
+	if g1 == nil || g1.Country != "JP" || g1.ASN != "AS2516" || g1.City != "Tokyo" {
+		t.Fatalf("resolveOutbound(1) = %+v", g1)
+	}
+	if g2 == nil || g2.Country != "JP" || g2.ASN != "AS2516" {
+		t.Fatalf("resolveOutbound(2) = %+v", g2)
+	}
+	if domesticHits.Load() != 0 {
+		t.Errorf("非 CN CF 落地不应请求国内 GeoIP 接口, 实际请求 %d 次", domesticHits.Load())
+	}
+	if metaHits.Load() != 1 {
+		t.Errorf("同出口 IP 元数据补全应命中缓存去重, 实际请求 %d 次", metaHits.Load())
+	}
+}

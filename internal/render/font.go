@@ -109,25 +109,34 @@ func buildFontCandidates() []string {
 
 var fontCandidates = buildFontCandidates()
 
-// fontBook 缓存已加载的字体与按字号派生的 font.Face。
-type fontBook struct {
-	mu    sync.Mutex
-	font  *opentype.Font
-	faces map[float64]font.Face
+// fontBook 缓存已加载的字体（按自定义路径）与按（字体, 字号）派生的 font.Face。
+type faceKey struct {
+	font *opentype.Font
+	size float64
 }
 
-var book = &fontBook{faces: map[float64]font.Face{}}
+type fontBook struct {
+	mu    sync.Mutex
+	fonts map[string]*opentype.Font
+	faces map[faceKey]font.Face
+}
+
+var book = &fontBook{
+	fonts: make(map[string]*opentype.Font),
+	faces: make(map[faceKey]font.Face),
+}
 
 // loadFont 按 meta.FontPath → 系统候选路径的顺序加载字体。
 func loadFont(custom string) (*opentype.Font, error) {
+	key := strings.TrimSpace(custom)
 	book.mu.Lock()
 	defer book.mu.Unlock()
-	if book.font != nil {
-		return book.font, nil
+	if f, ok := book.fonts[key]; ok {
+		return f, nil
 	}
 	paths := fontCandidates
-	if custom != "" {
-		paths = append([]string{custom}, fontCandidates...)
+	if key != "" {
+		paths = append([]string{key}, fontCandidates...)
 	}
 	var errs []string
 	for _, p := range paths {
@@ -140,7 +149,7 @@ func loadFont(custom string) (*opentype.Font, error) {
 			errs = append(errs, fmt.Sprintf("%s: %v", p, err))
 			continue
 		}
-		book.font = f
+		book.fonts[key] = f
 		return f, nil
 	}
 	if len(errs) > 0 {
@@ -157,11 +166,12 @@ func parseFont(b []byte) (*opentype.Font, error) {
 	return opentype.Parse(b)
 }
 
-// face 返回指定字号的 font.Face（带缓存）。
+// face 返回指定字体与字号的 font.Face（带缓存）。
 func face(f *opentype.Font, size float64) (font.Face, error) {
+	key := faceKey{font: f, size: size}
 	book.mu.Lock()
 	defer book.mu.Unlock()
-	if fc, ok := book.faces[size]; ok {
+	if fc, ok := book.faces[key]; ok {
 		return fc, nil
 	}
 	fc, err := opentype.NewFace(f, &opentype.FaceOptions{
@@ -172,7 +182,7 @@ func face(f *opentype.Font, size float64) (font.Face, error) {
 	if err != nil {
 		return nil, err
 	}
-	book.faces[size] = fc
+	book.faces[key] = fc
 	return fc, nil
 }
 

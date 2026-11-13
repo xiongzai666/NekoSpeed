@@ -26,8 +26,13 @@ import (
 	"nekospeed/internal/unlock"
 )
 
-// Version 输出图片与 JSON 中的版本标识。
-const Version = "0.1.0"
+// Version 输出图片与 JSON 中的版本标识（支持通过 -ldflags -X 注入）。
+var Version = "0.1.0"
+
+var (
+	stampSuffixRe = regexp.MustCompile(`_\d{8}_\d{6}$`)
+	bareStampRe   = regexp.MustCompile(`^\d{8}_\d{6}$`)
+)
 
 // Options 一次测速任务的全部参数。
 type Options struct {
@@ -234,13 +239,13 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 	}
 	elapsed := time.Since(start).Round(time.Second)
 
-	sortLabel := sortResults(results, o.SortBy)
-
-	// 4. 线路分析聚合
+	// 4. 线路分析聚合：先按订阅原始顺序编号聚类，再对节点结果表执行展示排序，避免排序打乱簇序号。
 	var topo *model.Topology
 	if hasTest(testSet, "topo") {
 		topo = geo.BuildTopology(results)
 	}
+
+	sortLabel := sortResults(results, o.SortBy)
 
 	// 5. 输出
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
@@ -314,7 +319,22 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 			return nil, err
 		}
 	}
-	if err := save(func(p string) error { return report.SaveJSON(results, topo, meta.Version, start, elapsed, p) }, prefix+"_result.json", "写出 JSON"); err != nil {
+	runMeta := report.RunMeta{
+		Version:   meta.Version,
+		StartTime: start,
+		Elapsed:   elapsed,
+		SubName:   meta.SubName,
+		Threads:   meta.Threads,
+		Single:    meta.Single,
+		PingCount: meta.PingCount,
+		Filter:    meta.Filter,
+		LocalISP:  meta.LocalISP,
+		Bandwidth: meta.Bandwidth,
+		SortBy:    strings.TrimSpace(o.SortBy),
+		Watermark: meta.Watermark,
+		Theme:     meta.Theme.Name,
+	}
+	if err := save(func(p string) error { return report.SaveJSONWithMeta(results, topo, runMeta, p) }, prefix+"_result.json", "写出 JSON"); err != nil {
 		return nil, err
 	}
 
@@ -449,10 +469,6 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 		return nil, fmt.Errorf("未找到原始测速数据 (*_result.json)")
 	}
 	prefix := strings.TrimSuffix(jsonFile, "_result.json")
-	subName := prefix
-	if len(prefix) > 16 && prefix[len(prefix)-16] == '_' && prefix[len(prefix)-7] == '_' {
-		subName = prefix[:len(prefix)-16]
-	}
 	raw, err := os.ReadFile(filepath.Join(outDir, jsonFile))
 	if err != nil {
 		return nil, err
@@ -462,6 +478,16 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 		Version   string    `json:"version"`
 		StartTime time.Time `json:"startTime"`
 		Elapsed   string    `json:"elapsed"`
+		SubName   string    `json:"subName"`
+		Threads   int       `json:"threads"`
+		Single    *bool     `json:"single"`
+		PingCount int       `json:"pingCount"`
+		Filter    string    `json:"filter"`
+		LocalISP  string    `json:"localISP"`
+		Bandwidth string    `json:"bandwidth"`
+		SortBy    string    `json:"sortBy"`
+		Watermark string    `json:"watermark"`
+		Theme     string    `json:"theme"`
 		Total     int       `json:"total"`
 		Succeeded int       `json:"succeeded"`
 		Nodes     []struct {
@@ -484,8 +510,17 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 		return nil, fmt.Errorf("解析 JSON 失败: %w", err)
 	}
 
+	subName := strings.TrimSpace(doc.SubName)
+	if subName == "" {
+		if m := stampSuffixRe.FindStringIndex(prefix); m != nil {
+			subName = prefix[:m[0]]
+		} else if !bareStampRe.MatchString(prefix) {
+			subName = prefix
+		}
+	}
+
 	var results []*model.NodeResult
-	threads := 1
+	threads := 0
 	hasSpeed, hasMedia, hasAI := false, false, false
 	for _, n := range doc.Nodes {
 		if n.Speed != nil {
@@ -517,6 +552,23 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 			Err:      n.Error,
 		})
 	}
+	if doc.Threads > 0 {
+		threads = doc.Threads
+	} else if threads == 0 {
+		threads = 1
+	}
+	single := hasSpeed && threads == 1
+	if doc.Single != nil {
+		single = *doc.Single
+	}
+	pingCount := doc.PingCount
+	if pingCount <= 0 {
+		pingCount = 4
+	}
+	filterLabel := strings.TrimSpace(doc.Filter)
+	if filterLabel == "" {
+		filterLabel = "None"
+	}
 
 	sortLabel := sortResults(results, o.SortBy)
 	dur, _ := time.ParseDuration(doc.Elapsed)
@@ -525,8 +577,18 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 		ver = Version
 	}
 	theme := render.DefaultTheme()
-	if o.Theme != "" {
-		theme = render.ThemeByName(o.Theme)
+	if themeName := strings.TrimSpace(o.Theme); themeName != "" {
+		theme = render.ThemeByName(themeName)
+	} else if themeName := strings.TrimSpace(doc.Theme); themeName != "" {
+		theme = render.ThemeByName(themeName)
+	}
+	bandwidth := strings.TrimSpace(o.Bandwidth)
+	if bandwidth == "" {
+		bandwidth = doc.Bandwidth
+	}
+	watermark := strings.TrimSpace(o.Watermark)
+	if watermark == "" && o.Watermark == "" {
+		watermark = doc.Watermark
 	}
 	meta := render.Meta{
 		Version:      ver,
@@ -534,15 +596,16 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 		Total:        len(results),
 		Succeeded:    countOK(results),
 		StartTime:    doc.StartTime,
-		Watermark:    strings.TrimSpace(o.Watermark),
-		Single:       threads == 1,
-		Bandwidth:    strings.TrimSpace(o.Bandwidth),
+		Watermark:    watermark,
+		Single:       single,
+		LocalISP:     doc.LocalISP,
+		Bandwidth:    bandwidth,
 		SortLabel:    sortLabel,
 		Theme:        theme,
 		SubName:      subName,
 		Elapsed:      dur,
-		PingCount:    4,
-		Filter:       "None",
+		PingCount:    pingCount,
+		Filter:       filterLabel,
 		TrafficBytes: totalTrafficBytes(results),
 	}
 
@@ -578,7 +641,11 @@ func ReRender(outDir string, o ReRenderOptions) ([]string, error) {
 	if doc.Topology != nil || existingPNGs[prefix+"_topology.png"] {
 		topo := doc.Topology
 		if topo == nil {
-			topo = geo.BuildTopology(results)
+			ordered := append([]*model.NodeResult(nil), results...)
+			sort.SliceStable(ordered, func(i, j int) bool {
+				return ordered[i].Node.Index < ordered[j].Node.Index
+			})
+			topo = geo.BuildTopology(ordered)
 		}
 		name := prefix + "_topology.png"
 		if err := render.SaveTopologyImage(results, topo, meta, filepath.Join(outDir, name)); err != nil {
@@ -627,6 +694,9 @@ func sortResults(results []*model.NodeResult, sortBy string) string {
 		})
 		return "延迟升序"
 	default:
+		sort.SliceStable(results, func(i, j int) bool {
+			return results[i].Node.Index < results[j].Node.Index
+		})
 		return "订阅原序"
 	}
 }

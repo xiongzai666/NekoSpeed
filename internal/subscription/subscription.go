@@ -246,20 +246,24 @@ func extractNameFromContent(data []byte) string {
 	return ""
 }
 
+var (
+	invalidNameCharsRe        = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]+`)
+	collapseSpaceUnderscoreRe = regexp.MustCompile(`[\s_]+`)
+)
+
 // sanitizeName 把名称整理为安全的文件名前缀。
 // 保留中文等字符，只替换文件系统非法 ASCII 字符；过长时截断。
 func sanitizeName(s string) string {
 	if s == "" {
 		return ""
 	}
-	re := regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]+`)
-	s = re.ReplaceAllString(s, "_")
+	s = invalidNameCharsRe.ReplaceAllString(s, "_")
 	s = strings.TrimSpace(s)
 	s = strings.TrimSuffix(s, ".yaml")
 	s = strings.TrimSuffix(s, ".yml")
 	s = strings.TrimSuffix(s, ".txt")
 	s = strings.TrimSuffix(s, ".json")
-	s = regexp.MustCompile(`[\s_]+`).ReplaceAllString(s, "_")
+	s = collapseSpaceUnderscoreRe.ReplaceAllString(s, "_")
 	s = strings.Trim(s, "_")
 	if len([]rune(s)) > 64 {
 		s = string([]rune(s)[:64])

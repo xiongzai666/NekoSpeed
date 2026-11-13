@@ -1,9 +1,14 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"nekospeed/internal/geo"
 	"nekospeed/internal/model"
+	"nekospeed/internal/report"
 )
 
 func TestFormatLocalISP(t *testing.T) {
@@ -109,5 +114,76 @@ func TestNodeResultOKAndSort(t *testing.T) {
 	}
 	if list[0].Node.Name != "lowLat" || list[2].Node.Name != "dead" {
 		t.Fatalf("按延迟升序结果异常: %s, %s, %s", list[0].Node.Name, list[1].Node.Name, list[2].Node.Name)
+	}
+
+	if label := sortResults(list, ""); label != "订阅原序" {
+		t.Fatalf("sortResults none label = %q", label)
+	}
+	if list[0].Node.Name != "dead" || list[1].Node.Name != "fast" || list[2].Node.Name != "lowLat" {
+		t.Fatalf("恢复订阅原序异常: %s, %s, %s", list[0].Node.Name, list[1].Node.Name, list[2].Node.Name)
+	}
+}
+
+func TestBuildTopologyBeforeSortPreservesOriginalClusterOrder(t *testing.T) {
+	n0 := &model.NodeResult{
+		Node:     model.Node{Index: 0, Name: "n0"},
+		Inbound:  &model.GeoInfo{IP: "1.1.1.1", Stack: "4"},
+		Outbound: &model.GeoInfo{IP: "9.9.9.9", Stack: "4"},
+		Speed:    &model.SpeedResult{Avg: 10},
+	}
+	n1 := &model.NodeResult{
+		Node:     model.Node{Index: 1, Name: "n1"},
+		Inbound:  &model.GeoInfo{IP: "2.2.2.2", Stack: "4"},
+		Outbound: &model.GeoInfo{IP: "8.8.8.8", Stack: "4"},
+		Speed:    &model.SpeedResult{Avg: 100},
+	}
+	list := []*model.NodeResult{n0, n1}
+	topo := geo.BuildTopology(list)
+	sortResults(list, "speed")
+	if list[0].Node.Name != "n1" {
+		t.Fatalf("预期按速度排序后 n1 在首位")
+	}
+	if len(topo.Outbounds) != 2 || topo.Outbounds[0].NodeName != "n0" || topo.Outbounds[0].Cluster != 1 || topo.Outbounds[1].Cluster != 2 {
+		t.Fatalf("排序前计算的拓扑簇顺序异常: %+v", topo.Outbounds)
+	}
+}
+
+func TestReRenderRestoresMetaAndBareStamp(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Truncate(time.Second)
+	res := []*model.NodeResult{
+		{
+			Node:     model.Node{Index: 0, Name: "HK-1", Type: "ss", Server: "1.1.1.1"},
+			Outbound: &model.GeoInfo{IP: "203.0.113.1", Country: "HK", Stack: "4"},
+			Media:    []model.UnlockResult{{Platform: "youtube", Status: model.StatusUnlock, Region: "HK"}},
+		},
+	}
+	topo := geo.BuildTopology(res)
+	meta := report.RunMeta{
+		Version:   "0.2.0",
+		StartTime: now,
+		Elapsed:   2 * time.Second,
+		SubName:   "",
+		Threads:   8,
+		Single:    false,
+		PingCount: 6,
+		Filter:    "包含:HK",
+		LocalISP:  "北京电信",
+		Bandwidth: "500 Mbps",
+		Theme:     "midnight",
+	}
+	jsonPath := filepath.Join(dir, "20261113_230000_result.json")
+	if err := report.SaveJSONWithMeta(res, topo, meta, jsonPath); err != nil {
+		t.Fatal(err)
+	}
+	files, err := ReRender(dir, ReRenderOptions{SortBy: "none"})
+	if err != nil {
+		t.Fatalf("ReRender 失败: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("ReRender 未返回生成文件列表")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "20261113_230000_media.png")); err != nil {
+		t.Fatalf("应生成裸时间戳前缀图片: %v", err)
 	}
 }

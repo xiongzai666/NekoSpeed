@@ -87,7 +87,19 @@ func RunAI(ctx context.Context, d model.Dialer) []model.UnlockResult {
 	return runAll(ctx, d, aiCheckers)
 }
 
+type transportDialer struct {
+	model.Dialer
+	tr *http.Transport
+}
+
 func runAll(ctx context.Context, d model.Dialer, checkers []Checker) []model.UnlockResult {
+	if c := model.HTTPClient(d, requestTimeout); c != nil {
+		if tr, ok := c.Transport.(*http.Transport); ok {
+			defer tr.CloseIdleConnections()
+			d = &transportDialer{Dialer: d, tr: tr}
+		}
+	}
+
 	results := make([]model.UnlockResult, len(checkers))
 	var wg sync.WaitGroup
 	for i, c := range checkers {
@@ -115,8 +127,14 @@ type httpError struct{ err error }
 func (e *httpError) Error() string { return e.err.Error() }
 
 // newClient 构建经 d 拨号的 http.Client；followRedirect=false 时不跟随重定向。
+// 在 runAll 内部会复用同一节点的连接池，显著降低并发检测时的 TLS 握手与连接开销。
 func newClient(d model.Dialer, followRedirect bool) *http.Client {
-	c := model.HTTPClient(d, requestTimeout)
+	var c *http.Client
+	if td, ok := d.(*transportDialer); ok && td.tr != nil {
+		c = &http.Client{Transport: td.tr, Timeout: requestTimeout}
+	} else {
+		c = model.HTTPClient(d, requestTimeout)
+	}
 	if !followRedirect {
 		c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse

@@ -7,12 +7,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strings"
 
 	"nekospeed/internal/model"
+)
+
+const (
+	defaultAbemaCheckURL = "https://abema.tv/"
+	defaultAbemaAPIURL   = "https://api.abema.io/v1/ip/check?device=android"
 )
 
 // 各平台检测端点（包内变量，测试时可替换为 httptest 服务器地址）。
@@ -25,8 +31,8 @@ var (
 	tiktokURL            = "https://www.tiktok.com/"
 	tiktokAPIURL         = "https://www.tiktok.com/node/share/video/7049860927877885189"
 	daznStartupURL       = "https://startup.core.indazn.com/misl/v5/Startup"
-	abemaCheckURL        = "https://abema.tv/"
-	abemaAPIURL          = "https://api.abema.io/v1/ip/check?device=android"
+	abemaCheckURL        = defaultAbemaCheckURL
+	abemaAPIURL          = defaultAbemaAPIURL
 	bahamutDeviceURL     = "https://ani.gamer.com.tw/ajax/getdeviceid.php"
 	bahamutTokenURL      = "https://ani.gamer.com.tw/ajax/token.php?adID=89422&sn=37783"
 	bahamutHomeURL       = "https://ani.gamer.com.tw/"
@@ -190,19 +196,41 @@ func checkDazn(ctx context.Context, d model.Dialer) model.UnlockResult {
 	return model.UnlockResult{Status: model.StatusUnlock}
 }
 
-// checkAbema 通过主站检测；仅日本解锁。
-// 主站返回 200 表示可访问，403/503 表示地区限制。
+// checkAbema 优先通过 Abema 官方 IP 检测接口识别日本原生解锁与机房/海外拦截；
+// 若测试仅替换了 abemaCheckURL，则兼容旧版首页检测行为。
 func checkAbema(ctx context.Context, d model.Dialer) model.UnlockResult {
-	r, err := doGet(ctx, newClient(d, true), abemaCheckURL)
+	c := newClient(d, true)
+	if abemaCheckURL != defaultAbemaCheckURL && abemaAPIURL == defaultAbemaAPIURL {
+		r, err := doGet(ctx, c, abemaCheckURL)
+		if err != nil {
+			return reqFailed("abema")
+		}
+		if r.StatusCode == 200 {
+			return model.UnlockResult{Status: model.StatusUnlock, Region: "JP"}
+		}
+		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d", r.StatusCode)}
+	}
+
+	r, err := doRequest(ctx, c, http.MethodGet, abemaAPIURL, nil, map[string]string{
+		"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 7)",
+	})
 	if err != nil {
 		return reqFailed("abema")
 	}
-	if r.StatusCode == 200 {
-		return model.UnlockResult{Status: model.StatusUnlock, Region: "JP"}
+	var resp struct {
+		ISOCountryCode string `json:"isoCountryCode"`
+		Message        string `json:"message"`
 	}
-	body := strings.ToLower(string(r.Body))
-	if strings.Contains(body, "blocked") || strings.Contains(body, "not available") || r.StatusCode == 403 || r.StatusCode == 503 {
-		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d", r.StatusCode)}
+	_ = json.Unmarshal(r.Body, &resp)
+
+	if cc := strings.ToUpper(strings.TrimSpace(resp.ISOCountryCode)); cc != "" {
+		if cc == "JP" {
+			return model.UnlockResult{Status: model.StatusUnlock, Region: "JP"}
+		}
+		return model.UnlockResult{Status: model.StatusFailed, Region: cc, Info: "OverseaOnly"}
+	}
+	if resp.Message != "" {
+		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d (%s)", r.StatusCode, resp.Message)}
 	}
 	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d", r.StatusCode)}
 }

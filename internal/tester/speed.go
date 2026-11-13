@@ -45,13 +45,23 @@ func SpeedWithLimit(ctx context.Context, d model.Dialer, url string, threads, du
 	dlCtx, stopDownload := context.WithCancel(ctx)
 	defer stopDownload()
 
-	var total atomic.Int64
-	var wg sync.WaitGroup
+	var (
+		total     atomic.Int64
+		wg        sync.WaitGroup
+		limitOnce sync.Once
+		limitCh   = make(chan struct{})
+	)
+	hitLimit := func() {
+		limitOnce.Do(func() {
+			stopDownload()
+			close(limitCh)
+		})
+	}
 	for i := 0; i < threads; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			downloadLoop(dlCtx, d, urls, workerID, &total, maxBytes, stopDownload)
+			downloadLoop(dlCtx, d, urls, workerID, &total, maxBytes, hitLimit)
 		}(i)
 	}
 
@@ -59,14 +69,26 @@ func SpeedWithLimit(ctx context.Context, d model.Dialer, url string, threads, du
 		PerSecond: make([]float64, 0, durationSec),
 		Threads:   threads,
 	}
+	started := time.Now()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var last int64
+	cappedEarly := false
 loop:
 	for i := 0; i < durationSec; i++ {
 		select {
 		case <-ctx.Done():
 			break loop // 外部取消/兜底超时，提前结束
+		case <-limitCh:
+			cur := total.Load()
+			if delta := float64(cur - last); delta > 0 {
+				res.PerSecond = append(res.PerSecond, delta)
+				if delta > res.Max {
+					res.Max = delta
+				}
+			}
+			cappedEarly = true
+			break loop
 		case <-ticker.C:
 			cur := total.Load()
 			delta := float64(cur - last)
@@ -76,6 +98,7 @@ loop:
 				res.Max = delta
 			}
 			if maxBytes > 0 && cur >= maxBytes {
+				cappedEarly = true
 				break loop
 			}
 		}
@@ -83,7 +106,16 @@ loop:
 	stopDownload()
 	wg.Wait()
 
-	if n := len(res.PerSecond); n > 0 {
+	if cappedEarly {
+		elapsed := time.Since(started).Seconds()
+		if elapsed < 0.05 {
+			elapsed = 0.05
+		}
+		res.Avg = float64(total.Load()) / elapsed
+		if res.Avg > res.Max {
+			res.Max = res.Avg
+		}
+	} else if n := len(res.PerSecond); n > 0 {
 		sum := 0.0
 		for _, v := range res.PerSecond {
 			sum += v
@@ -94,7 +126,7 @@ loop:
 }
 
 // downloadLoop 单个工作线程：循环下载直到 ctx 取消；失败换下一个 URL 重连。
-func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID int, total *atomic.Int64, maxBytes int64, stop context.CancelFunc) {
+func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID int, total *atomic.Int64, maxBytes int64, hitLimit func()) {
 	transport := &http.Transport{
 		DialContext:           d.DialContext,
 		Proxy:                 nil,
@@ -110,7 +142,7 @@ func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID i
 			return
 		}
 		target := urls[(workerID+attempt)%len(urls)]
-		downloadOnce(ctx, client, target, total, maxBytes, stop)
+		downloadOnce(ctx, client, target, total, maxBytes, hitLimit)
 		if ctx.Err() != nil {
 			return
 		}
@@ -124,7 +156,7 @@ func downloadLoop(ctx context.Context, d model.Dialer, urls []string, workerID i
 }
 
 // downloadOnce 下载一次 target，把读到的字节计入 total。
-func downloadOnce(ctx context.Context, client *http.Client, target string, total *atomic.Int64, maxBytes int64, stop context.CancelFunc) {
+func downloadOnce(ctx context.Context, client *http.Client, target string, total *atomic.Int64, maxBytes int64, hitLimit func()) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return
@@ -138,20 +170,20 @@ func downloadOnce(ctx context.Context, client *http.Client, target string, total
 	if resp.StatusCode >= 400 {
 		return
 	}
-	_, _ = io.Copy(countingWriter{total: total, maxBytes: maxBytes, stop: stop}, resp.Body)
+	_, _ = io.Copy(countingWriter{total: total, maxBytes: maxBytes, hitLimit: hitLimit}, resp.Body)
 }
 
 // countingWriter 把写入字节数累加到共享原子计数器，数据本体丢弃。
 type countingWriter struct {
 	total    *atomic.Int64
 	maxBytes int64
-	stop     context.CancelFunc
+	hitLimit func()
 }
 
 func (w countingWriter) Write(p []byte) (int, error) {
 	cur := w.total.Add(int64(len(p)))
-	if w.maxBytes > 0 && cur >= w.maxBytes && w.stop != nil {
-		w.stop()
+	if w.maxBytes > 0 && cur >= w.maxBytes && w.hitLimit != nil {
+		w.hitLimit()
 	}
 	return len(p), nil
 }

@@ -566,3 +566,66 @@ func TestGrokHTTPError(t *testing.T) {
 		t.Fatalf("期望失败，得到 %+v", res)
 	}
 }
+
+func TestAbemaAPIJapanUnlockAndBlocks(t *testing.T) {
+	t.Run("JP_Unlock", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`{"isoCountryCode":"JP"}`))
+		}))
+		defer srv.Close()
+		swapURL(t, &abemaAPIURL, srv.URL)
+		res := checkAbema(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "JP" {
+			t.Fatalf("期望解锁(JP)，得到 %+v", res)
+		}
+	})
+
+	t.Run("OverseaOnly", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`{"isoCountryCode":"US"}`))
+		}))
+		defer srv.Close()
+		swapURL(t, &abemaAPIURL, srv.URL)
+		res := checkAbema(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "US" {
+			t.Fatalf("期望非日本地区返回失败(US)，得到 %+v", res)
+		}
+	})
+
+	t.Run("AnonymousIP_403", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"anonymous_ip"}`))
+		}))
+		defer srv.Close()
+		swapURL(t, &abemaAPIURL, srv.URL)
+		res := checkAbema(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Info != "HTTP 403 (anonymous_ip)" {
+			t.Fatalf("期望返回 HTTP 403 (anonymous_ip) 失败，得到 %+v", res)
+		}
+	})
+}
+
+func TestOpenAICountryBlockedSurvivesIOSFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/trace", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("loc=CN\n"))
+	})
+	mux.HandleFunc("/compliance", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		w.Write([]byte(`{"error":{"code":"unsupported_country"}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	swapURL(t, &openAITraceURL, srv.URL+"/trace")
+	swapURL(t, &openAIComplianceURL, srv.URL+"/compliance")
+	swapURL(t, &openAIIOSURL, "http://127.0.0.1:1/unreachable")
+
+	res := checkOpenAI(context.Background(), directDialer())
+	if res.Status != model.StatusFailed || res.Region != "CN" || res.Info != "地区不支持" {
+		t.Fatalf("期望即使 ios 探针出错仍返回地区不支持，得到 %+v", res)
+	}
+}

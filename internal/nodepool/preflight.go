@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
@@ -195,11 +196,13 @@ func queryA(ctx context.Context, server, host string) []netip.Addr {
 	return QueryADirect(ctx, server, host)
 }
 
-// probeIPs 并发 TCP 探测 ips 的全部端口，返回通过所有端口探测的 IP（按输入顺序）。
+// probeIPs 并发 TCP 探测 ips；只要任一节点端口连通即视为该 IP 存活，按通过端口数从高到低排序（同分保持输入顺序）。
+var tcpProbeFn = tcpProbe
+
 func probeIPs(ctx context.Context, ips []netip.Addr, portList []uint16) []netip.Addr {
 	type result struct {
-		ip netip.Addr
-		ok bool
+		ip    netip.Addr
+		score int
 	}
 	results := make([]result, len(ips))
 	var wg sync.WaitGroup
@@ -207,23 +210,35 @@ func probeIPs(ctx context.Context, ips []netip.Addr, portList []uint16) []netip.
 		wg.Add(1)
 		go func(i int, ip netip.Addr) {
 			defer wg.Done()
-			ok := true
+			var okCount atomic.Int32
+			var pwg sync.WaitGroup
 			for _, p := range portList {
-				if !tcpProbe(ctx, ip, p) {
-					ok = false
-					break
-				}
+				pwg.Add(1)
+				go func(port uint16) {
+					defer pwg.Done()
+					if tcpProbeFn(ctx, ip, port) {
+						okCount.Add(1)
+					}
+				}(p)
 			}
-			results[i] = result{ip: ip, ok: ok}
+			pwg.Wait()
+			results[i] = result{ip: ip, score: int(okCount.Load())}
 		}(i, ip)
 	}
 	wg.Wait()
 
-	var good []netip.Addr
+	var passed []result
 	for _, r := range results {
-		if r.ok {
-			good = append(good, r.ip)
+		if r.score > 0 {
+			passed = append(passed, r)
 		}
+	}
+	sort.SliceStable(passed, func(i, j int) bool {
+		return passed[i].score > passed[j].score
+	})
+	good := make([]netip.Addr, len(passed))
+	for i, r := range passed {
+		good[i] = r.ip
 	}
 	return good
 }

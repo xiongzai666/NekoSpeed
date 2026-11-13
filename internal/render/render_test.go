@@ -96,3 +96,26 @@ func TestRenderTables(t *testing.T) {
 	}
 	t.Logf("渲染测试通过，图片: %s, 大小: %d bytes", path, info.Size())
 }
+
+func TestFontCacheKeysByPathAndFontFace(t *testing.T) {
+	f1, err := loadFont("")
+	if err != nil {
+		t.Skipf("无可用系统字体: %v", err)
+	}
+	// 第二次传入不同的不存在自定义路径，不应和 default key 混淆；至少返回有效字体，且同 key 命中缓存。
+	f2, err := loadFont(t.TempDir() + "/missing.ttf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc1, err := face(f1, 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc2, err := face(f2, 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fc1 == nil || fc2 == nil {
+		t.Fatal("face 不应为 nil")
+	}
+}

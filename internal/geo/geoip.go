@@ -48,9 +48,34 @@ var (
 
 const ipAPIFields = "status,countryCode,regionName,city,query,as,org,isp"
 
+var cz88ASRe = regexp.MustCompile(`AS\d+`)
+
+// mainlandProvinces 用于判断国内 IP 接口返回是否属于中国大陆，避免把海外/港澳台 IP 误标为 CN。
+var mainlandProvinces = []string{
+	"中国", "北京", "天津", "上海", "重庆",
+	"河北", "山西", "辽宁", "吉林", "黑龙江",
+	"江苏", "浙江", "安徽", "福建", "江西", "山东",
+	"河南", "湖北", "湖南", "广东", "海南",
+	"四川", "贵州", "云南", "陕西", "甘肃", "青海",
+	"广西", "内蒙古", "西藏", "宁夏", "新疆",
+}
+
+func isMainlandChinaLoc(s string) bool {
+	if s == "" || strings.Contains(s, "香港") || strings.Contains(s, "澳门") || strings.Contains(s, "台湾") {
+		return false
+	}
+	for _, p := range mainlandProvinces {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Resolver 封装 GeoIP 查询后端，带 IP 级缓存与并发去重。
 type Resolver struct {
-	mmdb *maxminddb.Reader // nil 表示使用在线 API
+	mmdb         *maxminddb.Reader // nil 表示使用在线 API
+	directClient *http.Client      // 复用的直连 HTTP 客户端（绕过系统代理与本地 TUN）
 
 	mu       sync.Mutex
 	cache    map[string]model.GeoInfo // key = IP
@@ -68,10 +93,18 @@ func NewResolver(mmdbPath string) (*Resolver, error) {
 	r := &Resolver{
 		cache:    make(map[string]model.GeoInfo),
 		inflight: make(map[string]*lookupCall),
+		directClient: &http.Client{
+			Timeout: 6 * time.Second,
+			Transport: &http.Transport{
+				Proxy:       nil,
+				DialContext: nodepool.DialDirectContext,
+			},
+		},
 	}
 	if mmdbPath != "" {
 		db, err := maxminddb.Open(mmdbPath)
 		if err != nil {
+			r.directClient.CloseIdleConnections()
 			return nil, fmt.Errorf("打开 mmdb: %w", err)
 		}
 		r.mmdb = db
@@ -79,8 +112,11 @@ func NewResolver(mmdbPath string) (*Resolver, error) {
 	return r, nil
 }
 
-// Close 释放 mmdb 句柄（在线模式下为空操作）。
+// Close 释放 mmdb 句柄并关闭直连空闲连接。
 func (r *Resolver) Close() error {
+	if r.directClient != nil {
+		r.directClient.CloseIdleConnections()
+	}
 	if r.mmdb != nil {
 		return r.mmdb.Close()
 	}
@@ -91,6 +127,10 @@ func (r *Resolver) Close() error {
 // d 非 nil 时经代理发起 API 请求（仅在线模式；mmdb 模式查本地库，忽略 d）。
 // 查询失败返回仅含 IP/Stack 的降级结果，同一 IP 的结果会被缓存去重。
 func (r *Resolver) Lookup(ctx context.Context, ip string, d model.Dialer) model.GeoInfo {
+	return r.lookupCached(ctx, ip, d, false)
+}
+
+func (r *Resolver) lookupCached(ctx context.Context, ip string, d model.Dialer, skipDomestic bool) model.GeoInfo {
 	if ip == "" {
 		return model.GeoInfo{}
 	}
@@ -112,7 +152,7 @@ func (r *Resolver) Lookup(ctx context.Context, ip string, d model.Dialer) model.
 	r.inflight[ip] = c
 	r.mu.Unlock()
 
-	g := r.doLookup(ctx, ip, d)
+	g := r.doLookup(ctx, ip, d, skipDomestic)
 
 	r.mu.Lock()
 	r.cache[ip] = g
@@ -123,7 +163,7 @@ func (r *Resolver) Lookup(ctx context.Context, ip string, d model.Dialer) model.
 	return g
 }
 
-func (r *Resolver) doLookup(ctx context.Context, ip string, d model.Dialer) model.GeoInfo {
+func (r *Resolver) doLookup(ctx context.Context, ip string, d model.Dialer, skipDomestic bool) model.GeoInfo {
 	if r.mmdb != nil {
 		return r.lookupMMDB(ip)
 	}
@@ -136,8 +176,8 @@ func (r *Resolver) doLookup(ctx context.Context, ip string, d model.Dialer) mode
 		return model.GeoInfo{IP: ip, Stack: stackOf(ip)}
 	}
 
-	// 1. 若为直连或明确国内网络，优先调用国内高精纯真/百度引擎
-	if d == nil {
+	// 1. 若为直连且未明确为海外 IP，优先调用国内高精纯真/百度/太平洋引擎
+	if d == nil && !skipDomestic {
 		if g, err := r.lookupCZ88(ctx, ip, nil); err == nil && g.Country != "" {
 			return g
 		}
@@ -328,17 +368,22 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 		}
 	}
 
+	// 限制单个节点出口多源解析的总耗时，避免连续超时拖慢并发池。
+	ctx, cancel := context.WithTimeout(ctx, 18*time.Second)
+	defer cancel()
+
 	// 1. 优先经代理通过 Cloudflare Trace 实测真实出口 IP 与落地机房
 	cfGeo, err := r.lookupCFTrace(ctx, d)
 	if err == nil && cfGeo.IP != "" {
 		// 已通过真实物理测量锁定了真实出口 IP 与落地国家/机房代码
-		// 接下来补全 ASN / Org / ISP / City 详细元数据
+		// 接下来补全 ASN / Org / ISP / City 详细元数据（走缓存/inflight 去重）
 		var meta model.GeoInfo
 		if r.mmdb != nil {
 			meta = r.lookupMMDB(cfGeo.IP)
 		} else {
-			// 在线补全：直连查询该 IP（此时已拿到落地 IP，直连查更快更稳）
-			meta = r.doLookup(ctx, cfGeo.IP, nil)
+			// 在线补全：直连查询该 IP；若 CF Trace 已判定非 CN 落地，直接跳过国内专属接口
+			skipDomestic := cfGeo.Country != "" && cfGeo.Country != "CN"
+			meta = r.lookupCached(ctx, cfGeo.IP, nil, skipDomestic)
 		}
 
 		out := cfGeo
@@ -361,7 +406,7 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 			// 将 Cloudflare 的机房三字码 (PoP) 作为城市标注（如 "HKG"）
 			out.City = out.Region
 		}
-		return r.finishOutbound(out)
+		return &out
 	}
 
 	// 2. Cloudflare Trace 连不上时，平滑降级到在线多源池
@@ -429,18 +474,42 @@ func resolveServerIP(ctx context.Context, server string) string {
 	return nodepool.ResolveHostDirect(ctx, server)
 }
 
-// httpClient 直连用绑定物理网卡的客户端（绕过系统代理与本地 TUN），走代理用 model.HTTPClient。
-func httpClient(d model.Dialer) *http.Client {
-	if d == nil {
-		return &http.Client{
-			Timeout: 6 * time.Second,
-			Transport: &http.Transport{
-				Proxy:       nil,
-				DialContext: nodepool.DialDirectContext,
-			},
-		}
+// doGet 发起 HTTP GET 并读取有上限的响应体；直连复用 Resolver.directClient，走代理则在使用后关闭空闲连接。
+func (r *Resolver) doGet(ctx context.Context, url, userAgent string, d model.Dialer, maxBytes int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
 	}
-	return model.HTTPClient(d, 10*time.Second)
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	var c *http.Client
+	if d == nil {
+		if r.directClient != nil {
+			c = r.directClient
+		} else {
+			c = &http.Client{
+				Timeout: 6 * time.Second,
+				Transport: &http.Transport{
+					Proxy:       nil,
+					DialContext: nodepool.DialDirectContext,
+				},
+			}
+			defer c.CloseIdleConnections()
+		}
+	} else {
+		c = model.HTTPClient(d, 10*time.Second)
+		defer c.CloseIdleConnections()
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 }
 
 // lookupCZ88 查询纯真官方高精 IP 接口（支持区县级定位）。
@@ -449,17 +518,7 @@ func (r *Resolver) lookupCZ88(ctx context.Context, ip string, d model.Dialer) (m
 	if ip != "" {
 		url += "?ip=" + ip
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -500,32 +559,22 @@ func (r *Resolver) lookupCZ88(ctx context.Context, ip string, d model.Dialer) (m
 		ISP:     a.Data.ISP,
 		Org:     a.Data.ASN,
 	}
-	if g.Country == "" && (a.Data.Country == "中国" || a.Data.Province != "") {
+	if g.Country == "" && (a.Data.Country == "中国" || isMainlandChinaLoc(a.Data.Province)) {
 		g.Country = "CN"
 	}
-	if match := regexp.MustCompile(`AS\d+`).FindString(a.Data.ASN); match != "" {
+	if match := cz88ASRe.FindString(a.Data.ASN); match != "" {
 		g.ASN = match
 	}
 	return g, nil
 }
 
-// lookupBaidu 查询百度大数据 IP 归属。
+// lookupBaidu 查询百度大数据 IP 归属（仅认可中国大陆结果，避免海外 IP 被误标为 CN）。
 func (r *Resolver) lookupBaidu(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
 	url := baiduBaseURL + "?resource_id=6006&oe=utf8"
 	if ip != "" {
 		url += "&query=" + ip
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -540,6 +589,9 @@ func (r *Resolver) lookupBaidu(ctx context.Context, ip string, d model.Dialer) (
 		return model.GeoInfo{}, fmt.Errorf("baidu 查询失败")
 	}
 	loc := a.Data[0].Location // 形如 "安徽省安庆市 移动"
+	if !isMainlandChinaLoc(loc) {
+		return model.GeoInfo{}, fmt.Errorf("baidu 非中国大陆 IP: %s", loc)
+	}
 	retIP := a.Data[0].Origip
 	if retIP == "" {
 		retIP = ip
@@ -559,22 +611,13 @@ func (r *Resolver) lookupBaidu(ctx context.Context, ip string, d model.Dialer) (
 	return g, nil
 }
 
-// lookupPCOnline 查询太平洋电脑网 IP 归属。
+// lookupPCOnline 查询太平洋电脑网 IP 归属（仅认可中国大陆结果，避免海外 IP 被误标为 CN）。
 func (r *Resolver) lookupPCOnline(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
 	url := pconlineBaseURL + "?json=true"
 	if ip != "" {
 		url += "&ip=" + ip
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -586,6 +629,9 @@ func (r *Resolver) lookupPCOnline(ctx context.Context, ip string, d model.Dialer
 	}
 	if err := json.Unmarshal(body, &a); err != nil || a.IP == "" {
 		return model.GeoInfo{}, fmt.Errorf("pconline 查询失败")
+	}
+	if !isMainlandChinaLoc(a.Pro) && !isMainlandChinaLoc(a.Addr) {
+		return model.GeoInfo{}, fmt.Errorf("pconline 非中国大陆 IP: %s", a.Addr)
 	}
 	g := model.GeoInfo{
 		IP:      a.IP,
@@ -606,20 +652,7 @@ func (r *Resolver) lookupPCOnline(ctx context.Context, ip string, d model.Dialer
 
 // lookupCFTrace 经代理请求 Cloudflare Trace，获取实际出口 IP、国家与数据中心代号。
 func (r *Resolver) lookupCFTrace(ctx context.Context, d model.Dialer) (model.GeoInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfTraceURL, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 NekoSpeed/1.0")
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return model.GeoInfo{}, fmt.Errorf("cf-trace status %d", resp.StatusCode)
-	}
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	bodyBytes, err := r.doGet(ctx, cfTraceURL, "Mozilla/5.0 NekoSpeed/1.0", d, 64*1024)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -655,17 +688,7 @@ func (r *Resolver) lookupIPWhois(ctx context.Context, ip string, d model.Dialer)
 	if ip != "" {
 		url = ipwhoisBaseURL + "/" + ip + "?lang=zh-CN"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 NekoSpeed/1.0")
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 NekoSpeed/1.0", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -712,17 +735,7 @@ func (r *Resolver) lookupIPSB(ctx context.Context, ip string, d model.Dialer) (m
 	if ip != "" {
 		url = ipsbBaseURL + "/" + ip
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 NekoSpeed/1.0")
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 NekoSpeed/1.0", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -778,16 +791,7 @@ type ipAPIResponse struct {
 // lookupIPAPI 查询 ip-api.com。ip 为空时返回请求端（代理出口）自身的信息。
 func (r *Resolver) lookupIPAPI(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
 	url := ipAPIBaseURL + "/json/" + ip + "?fields=" + ipAPIFields + "&lang=zh-CN"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, url, "", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
@@ -825,16 +829,7 @@ type ipinfoResponse struct {
 
 // lookupIPInfo 查询 ipinfo.io（出口查询兜底），只能拿到请求端自身信息。
 func (r *Resolver) lookupIPInfo(ctx context.Context, d model.Dialer) (model.GeoInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ipinfoURL, nil)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	resp, err := httpClient(d).Do(req)
-	if err != nil {
-		return model.GeoInfo{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := r.doGet(ctx, ipinfoURL, "", d, 1<<20)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
