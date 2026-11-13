@@ -2,26 +2,27 @@
 
 ## 1. 目标
 
-为 NekoSpeed 打造一个 Android 原生 GUI，核心功能：
+为 NekoSpeed 提供原生 Android GUI，支持以下功能：
 
-- 输入/导入机场订阅
-- 选择测试项（speed / media / ai / topo / nat）
-- 执行测速并在手机上展示结果
-- 支持导出/分享 JSON 与 PNG
-- 主题切换（light / dark / NekoSpeed 主题色）
+- 通过订阅链接或直接粘贴订阅内容导入节点
+- 选择测试项（`speed` / `media` / `ai` / `topo` / `nat`）
+- 在前台服务中执行测速并实时查看日志与进度，支持随时取消
+- 展示节点列表、速度统计、流媒体与 AI 解锁矩阵、入口/出口拓扑以及渲染 PNG 报告图
+- 自动归档历史测速记录，支持相册保存与系统分享 JSON / PNG
+- 主题切换（System / Light / Dark / NekoSpeed）
 
 ## 2. 架构
 
-```
+```text
 Android App (Kotlin + Jetpack Compose)
         │
-        ├── assets/nekospeed-android-arm64
-        │     └─ 运行时释放到 files/nekospeed
+        ├── assets/nekospeed-android-{arm64,amd64}.gz + fonts/NotoSansCJKsc-Regular.otf
+        │     └─ 运行时解压释放到 files/
         │
-        ├──  ProcessBuilder 调用 NekoSpeed 二进制
-        │     -sub <url> -tests <...> -o files/out -json
+        ├── ProcessBuilder / linker64 前台服务调用 NekoSpeed 二进制
+        │     -sub <url|sub.txt> -tests <...> -o files/out -font files/NotoSansCJKsc-Regular.otf
         │
-        └──  解析 result.json 渲染原生 UI
+        └── 发现 *_result.json 与 *.png → 归档到 files/history/<ts>/ → 渲染 Compose UI
 ```
 
 ## 3. 技术栈
@@ -35,49 +36,64 @@ Android App (Kotlin + Jetpack Compose)
 
 ## 4. 为什么选嵌入二进制方案
 
-NekoSpeed 已可成功交叉编译：
+NekoSpeed 支持通过 NDK cgo 交叉编译为 Android 可执行文件（统一使用 bionic 动态链接适配 Android 14+ SELinux）：
 
 ```bash
-GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o nekospeed-android-arm64 ./cmd/nekospeed
+CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$NDK_ARM64_CLANG" \
+  go build -trimpath -ldflags "-s -w" -o nekospeed-android-arm64 ./cmd/nekospeed
+gzip -f nekospeed-android-arm64
 ```
 
-- 产物约 23 MB，可再压缩
-- 无需重写测速/解锁/拓扑逻辑
-- 和桌面版保持同步：更新 Go 代码后重新编译替换即可
+- gzip 压缩后约 10 MB（支持 `arm64` 与 `amd64` 模拟器）
+- 无需重写测速、解锁与拓扑探测逻辑
+- 与 Go 主仓共享核心内核，更新后通过 `scripts/build.sh` 重新编译替换即可
 
 ## 5. 项目结构
 
-```
+```text
 NekoSpeed/
-├── android/                          # Android 客户端
+├── android/                                     # Android 客户端工程
 │   ├── app/
 │   │   ├── src/main/
 │   │   │   ├── assets/
-│   │   │   │   └── nekospeed-android-arm64
-│   │   │   ├── java/com/example/nekospeed/
+│   │   │   │   ├── nekospeed-android-arm64.gz   # 运行时按 ABI 解压
+│   │   │   │   ├── nekospeed-android-amd64.gz
+│   │   │   │   └── fonts/NotoSansCJKsc-Regular.otf
+│   │   │   ├── java/com/nekospeed/android/
 │   │   │   │   ├── MainActivity.kt
 │   │   │   │   ├── NekoSpeedApp.kt
 │   │   │   │   ├── data/
-│   │   │   │   │   ├── NekoSpeedRunner.kt      # 二进制调用
-│   │   │   │   │   ├── ResultRepository.kt
+│   │   │   │   │   ├── NekoSpeedRunner.kt       # 二进制释放、执行、取消与结果发现
+│   │   │   │   │   ├── ResultRepository.kt      # 结果读取与历史归档
 │   │   │   │   │   └── model/
-│   │   │   │   │       └── ResultDto.kt
+│   │   │   │       ├── ResultDto.kt
+│   │   │   │       └── HistoryRecord.kt
+│   │   │   │   ├── service/
+│   │   │   │   │   ├── NekoSpeedService.kt      # 前台服务保活与取消
+│   │   │   │   │   └── NekoSpeedServiceState.kt
+│   │   │   │   ├── util/
+│   │   │   │   │   ├── ShareHelper.kt           # FileProvider 分享与相册保存
+│   │   │   │   │   └── VpnDetector.kt           # VPN / 代理冲突检测
 │   │   │   │   ├── ui/
 │   │   │   │   │   ├── screens/
 │   │   │   │   │   │   ├── InputScreen.kt
 │   │   │   │   │   │   ├── RunningScreen.kt
-│   │   │   │   │   │   └── ResultScreen.kt
+│   │   │   │   │   │   ├── ResultScreen.kt
+│   │   │   │   │   │   └── HistoryScreen.kt
 │   │   │   │   │   └── components/
 │   │   │   │   │       ├── NodeList.kt
-│   │   │   │   │       ├── SpeedBar.kt
-│   │   │   │   │       └── UnlockGrid.kt
+│   │   │   │   │       ├── UnlockGrid.kt
+│   │   │   │       └── TopologyTable.kt
 │   │   │   │   └── viewmodel/
-│   │   │   │       └── RunViewModel.kt
+│   │   │   │       ├── RunViewModel.kt
+│   │   │   │       └── HistoryViewModel.kt
 │   │   └── build.gradle.kts
 │   └── build.gradle.kts
 ├── scripts/
-│   └── build.sh                       # 追加 android arm64 目标
-└── ...
+│   └── build.sh                                 # 自动交叉编译并 gzip 压缩入 assets
+└── docs/
+    ├── android-progress.md                      # 详细开发与发布日志
+    └── android-implementation-plan.md           # Phase 0-1 实施计划
 ```
 
 ## 6. 关键模块
@@ -91,35 +107,39 @@ class NekoSpeedRunner(private val context: Context) {
 
     suspend fun ensureBinary() = withContext(Dispatchers.IO) {
         if (!binary.exists()) {
-            context.assets.open("nekospeed-android-arm64").use { input ->
-                binary.outputStream().use { output -> input.copyTo(output) }
-            }
-            binary.setExecutable(true)
+            // 按 Build.SUPPORTED_ABIS 解压 assets/nekospeed-android-{arm64,amd64}.gz
+            // 并释放内置中文字体 NotoSansCJKsc-Regular.otf
         }
     }
 
     suspend fun run(
         sub: String,
         tests: List<String>,
-        concurrency: Int = 1
-    ): File = withContext(Dispatchers.IO) {
-        val outDir = File(context.filesDir, "out").apply { mkdirs() }
+        concurrency: Int = 6
+    ): File? = withContext(Dispatchers.IO) {
+        val outDir = File(context.filesDir, "out").apply {
+            deleteRecursively()
+            mkdirs()
+        }
         val process = ProcessBuilder(
             binary.absolutePath,
-            "-sub", sub,
+            "-sub", sub, // 支持本地 sub.txt，避免敏感 URL 出现在进程参数中
             "-tests", tests.joinToString(","),
             "-o", outDir.absolutePath,
-            "-concurrency", concurrency.toString()
+            "-concurrency", concurrency.toString(),
+            "-font", fontFile.absolutePath
         ).redirectErrorStream(true).start()
         process.waitFor()
-        File(outDir, "result.json")
+        outDir.listFiles { f -> f.name.endsWith("_result.json") }?.maxByOrNull { it.lastModified() }
     }
 }
 ```
 
+> 以上为调用流程示意，完整实现（含 `linker64` 回退执行、`cancel()` 强杀进程与实时日志流读取）见 `android/app/src/main/java/com/nekospeed/android/data/NekoSpeedRunner.kt`。
+
 ### 6.2 数据模型
 
-复用 NekoSpeed `result.json` 结构：
+复用 Go 端输出的 `*_result.json` 结构（见 `ResultDto.kt`）：
 
 ```kotlin
 @Serializable
@@ -150,37 +170,40 @@ data class Node(
 
 | 页面 | 功能 |
 |---|---|
-| 输入页 | 粘贴订阅 URL / 选择测试项 / 开始 / 主题切换 |
-| 运行页 | 显示进度、日志输出、取消按钮 |
-| 结果页 | Tab：节点列表 / 速度 / 解锁 / 拓扑 |
-| 节点列表 | 名称、延迟、平均速度、最高速度 |
-| 解锁矩阵 | 媒体/AI 平台 × 节点，色块表示成功/失败 |
-| 拓扑 | 入口/出口 IP、国家、ASN |
+| 输入页 | 订阅 URL / 粘贴订阅内容、选择测试项、高级参数、主题切换与历史入口 |
+| 运行页 | 显示实时日志、进度与取消按钮（支持前台服务保活与状态恢复） |
+| 结果页 | 四 Tab：节点列表 / 解锁 / 拓扑 / 图片（支持单图分享与保存到相册） |
+| 历史页 | 查看已归档历史报告、重新加载详情与删除记录 |
+| 节点列表 | 名称、延迟、平均速度、最高速度与状态 |
+| 解锁矩阵 | 媒体 / AI 平台 × 节点，色块表示成功 / 失败 |
+| 拓扑 | 入口 / 出口 IP、国家、ASN 与聚合统计 |
 
 ## 7. 功能范围
 
-完整版包含：
+已实现核心功能：
 
-- 全部测试：speed / media / ai / topo / nat
+- 全部测试：`speed` / `media` / `ai` / `topo` / `nat`
 - 解锁矩阵（媒体 + AI 平台色块）
-- 拓扑图（入口/出口聚合表）
-- 主题切换（light / dark / NekoSpeed 主题色）
-- 订阅输入、测试参数设置、结果分享
+- 拓扑图（入口 / 出口聚合表）与渲染 PNG 预览/保存/分享
+- 主题切换（System / Light / Dark / NekoSpeed）
+- 订阅 URL 与粘贴内容双模式（订阅 URL 落盘传参，日志脱敏）、历史归档与 VPN 冲突检测
 
 ## 8. 构建流程
 
-1. 在 NekoSpeed 项目根目录执行：
+1. 在 NekoSpeed 项目根目录执行构建脚本（自动下载内置中文字体，并编译 + gzip 压缩 Go 二进制到 `android/app/src/main/assets/`）：
 
 ```bash
-GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build \
-  -trimpath -ldflags "-s -w" \
-  -o android/app/src/main/assets/nekospeed-android-arm64 \
-  ./cmd/nekospeed
+./scripts/build.sh
 ```
 
-2. 在 Android Studio 打开 `android/` 目录，编译 APK。
+2. 在 Android Studio 打开 `android/` 目录或使用 Gradle Wrapper 编译 APK：
 
-3. 建议把步骤 1 加入 `scripts/build.sh` 和 CI。
+```bash
+cd android
+./gradlew assembleDebug
+```
+
+> 更多开发阶段与真机验证细节见 [docs/android-progress.md](android-progress.md)。
 
 ## 9. 注意事项
 

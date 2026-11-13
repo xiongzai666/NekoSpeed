@@ -1,16 +1,18 @@
-# NekoSpeed 桌面端可视化客户端开发文档（Windows + macOS）
+# NekoSpeed 桌面端可视化客户端开发方案（Windows + macOS）
+
+> **状态说明**：本文档为原生桌面客户端（Fyne）的技术规划方案，当前仓库尚未实现 `cmd/nekospeed-desktop`。桌面端图形界面请直接使用内置 Web UI（`nekospeed -web :18189`，Windows 下直接双击可执行文件会自动启动）。
 
 ## 1. 目标
 
 为 NekoSpeed 提供 **Windows `.exe` 和 macOS `.app` 原生可视化客户端**，且**不依赖 WebView / WebUI**。
 
 核心功能：
-- 输入/导入机场订阅
-- 选择测试项（speed / media / ai / topo / nat）
+- 输入 / 导入机场订阅
+- 选择测试项（`speed` / `media` / `ai` / `topo` / `nat`）
 - 实时显示运行日志
 - 展示结果：节点列表、速度、解锁矩阵、拓扑
 - 查看 NekoSpeed 生成的 PNG 结果图
-- 导出/分享 JSON 与 PNG
+- 导出 / 分享 JSON 与 PNG
 
 ## 2. 技术选型：Fyne
 
