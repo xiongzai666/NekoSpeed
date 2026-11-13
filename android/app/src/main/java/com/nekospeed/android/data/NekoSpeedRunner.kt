@@ -2,6 +2,7 @@ package com.nekospeed.android.data
 
 import android.content.Context
 import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -16,8 +17,14 @@ class NekoSpeedRunner(private val context: Context) {
     private val binary: File
         get() = File(context.filesDir, "nekospeed")
 
+    private val binaryStamp: File
+        get() = File(context.filesDir, ".nekospeed_version")
+
     private val font: File
         get() = File(context.filesDir, "NotoSansCJKsc-Regular.otf")
+
+    private val fontStamp: File
+        get() = File(context.filesDir, ".font_version")
 
     private val fontAsset = "fonts/NotoSansCJKsc-Regular.otf"
 
@@ -31,30 +38,76 @@ class NekoSpeedRunner(private val context: Context) {
     @Volatile
     private var currentProcess: Process? = null
 
+    private fun appVersionStamp(): String {
+        return try {
+            @Suppress("DEPRECATION")
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            "${PackageInfoCompat.getLongVersionCode(info)}-${info.lastUpdateTime}"
+        } catch (_: Exception) {
+            "0"
+        }
+    }
+
+    private fun isUpToDate(target: File, stampFile: File, expectedStamp: String): Boolean {
+        if (!target.exists() || target.length() == 0L || !stampFile.exists()) return false
+        return try {
+            stampFile.readText().trim() == expectedStamp
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun extractAssetAtomically(
+        assetName: String,
+        target: File,
+        stampFile: File,
+        stamp: String,
+        executable: Boolean
+    ) {
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        tmp.delete()
+        context.assets.open(assetName).use { input ->
+            val stream = if (assetName.endsWith(".gz")) GZIPInputStream(input) else input
+            tmp.outputStream().use { output ->
+                stream.copyTo(output)
+            }
+        }
+        if (executable) {
+            tmp.setExecutable(true)
+        }
+        if (target.exists() && !target.delete()) {
+            tmp.delete()
+            throw IOException("无法覆盖旧文件: ${target.name}")
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete()
+            throw IOException("无法落盘文件: ${target.name}")
+        }
+        if (executable) {
+            target.setExecutable(true)
+        }
+        stampFile.writeText(stamp)
+    }
+
     suspend fun ensureBinary() = withContext(Dispatchers.IO) {
-        if (binary.exists()) return@withContext
+        val stamp = appVersionStamp()
+        if (isUpToDate(binary, binaryStamp, stamp)) {
+            binary.setExecutable(true)
+            return@withContext
+        }
 
         val assetName = compressedAssets.firstOrNull { assetExists(context, it) }
             ?: throw IllegalStateException("未找到 assets 中的二进制文件")
 
-        context.assets.open(assetName).use { input ->
-            val stream = if (assetName.endsWith(".gz")) GZIPInputStream(input) else input
-            binary.outputStream().use { output ->
-                stream.copyTo(output)
-            }
-        }
-        binary.setExecutable(true)
+        extractAssetAtomically(assetName, binary, binaryStamp, stamp, executable = true)
     }
 
     /** 解压内置中文字体（厂商 ROM 系统字体解析失败时经 -font 兜底） */
     suspend fun ensureFont() = withContext(Dispatchers.IO) {
-        if (font.exists()) return@withContext
+        val stamp = appVersionStamp()
+        if (isUpToDate(font, fontStamp, stamp)) return@withContext
         if (!assetExists(context, fontAsset)) return@withContext
-        context.assets.open(fontAsset).use { input ->
-            font.outputStream().use { output ->
-                input.copyTo(output)
-            }
-        }
+        extractAssetAtomically(fontAsset, font, fontStamp, stamp, executable = false)
     }
 
     private fun assetExists(context: Context, name: String): Boolean {
@@ -74,6 +127,10 @@ class NekoSpeedRunner(private val context: Context) {
         concurrency: Int = 1,
         pingCount: Int = 4,
         filter: String? = null,
+        exclude: String? = null,
+        sortBy: String? = null,
+        maxMB: Int = 0,
+        preflight: Boolean = true,
         onLog: (String) -> Unit = {}
     ): Result = withContext(Dispatchers.IO) {
         val outDir = File(context.filesDir, "out")
@@ -95,6 +152,18 @@ class NekoSpeedRunner(private val context: Context) {
         }
         if (!filter.isNullOrBlank()) {
             args.addAll(listOf("-filter", filter))
+        }
+        if (!exclude.isNullOrBlank()) {
+            args.addAll(listOf("-exclude", exclude))
+        }
+        if (!sortBy.isNullOrBlank() && sortBy != "none") {
+            args.addAll(listOf("-sort", sortBy))
+        }
+        if (maxMB > 0) {
+            args.addAll(listOf("-max-mb", maxMB.toString()))
+        }
+        if (!preflight) {
+            args.add("-preflight=false")
         }
 
         val process = try {

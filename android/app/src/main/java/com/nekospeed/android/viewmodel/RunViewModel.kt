@@ -35,7 +35,11 @@ data class TestInput(
     val duration: Int = DEFAULT_DURATION,
     val concurrency: Int = DEFAULT_CONCURRENCY,
     val pingCount: Int = DEFAULT_PING_COUNT,
-    val filter: String = ""
+    val filter: String = "",
+    val exclude: String = "",
+    val sortBy: String = "",
+    val maxMB: Int = 0,
+    val preflight: Boolean = true
 ) {
     val isValid: Boolean
         get() = when (mode) {
@@ -134,7 +138,11 @@ class RunViewModel(application: Application) : AndroidViewModel(application) {
             duration = current.duration,
             concurrency = current.concurrency,
             pingCount = current.pingCount,
-            filter = current.filter.takeIf { it.isNotBlank() }
+            filter = current.filter.takeIf { it.isNotBlank() },
+            exclude = current.exclude.takeIf { it.isNotBlank() },
+            sortBy = current.sortBy.takeIf { it.isNotBlank() },
+            maxMB = current.maxMB,
+            preflight = current.preflight
         )
     }
 
@@ -152,7 +160,11 @@ class RunViewModel(application: Application) : AndroidViewModel(application) {
         duration: Int,
         concurrency: Int,
         pingCount: Int,
-        filter: String?
+        filter: String?,
+        exclude: String? = null,
+        sortBy: String? = null,
+        maxMB: Int = 0,
+        preflight: Boolean = true
     ) {
         NekoSpeedServiceBus.reset()
 
@@ -164,7 +176,11 @@ class RunViewModel(application: Application) : AndroidViewModel(application) {
             duration = duration,
             concurrency = concurrency,
             pingCount = pingCount,
-            filter = filter
+            filter = filter,
+            exclude = exclude,
+            sortBy = sortBy,
+            maxMB = maxMB,
+            preflight = preflight
         )
         ContextCompat.startForegroundService(getApplication(), intent)
     }

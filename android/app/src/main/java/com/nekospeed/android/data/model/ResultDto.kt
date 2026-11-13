@@ -29,7 +29,17 @@ data class NodeResult(
     val outbound: GeoInfo? = null
 ) {
     val isOK: Boolean
-        get() = error.isNullOrEmpty()
+        get() {
+            if (!error.isNullOrEmpty()) return false
+            if ((latency?.avgHTTPS ?: 0) > 0) return true
+            if ((speed?.avg ?: 0.0) > 0.0) return true
+            if (!outbound?.ip.isNullOrEmpty()) return true
+            if (!nat.isNullOrEmpty() && nat != "Unknown") return true
+            val hasValidUnlock: (List<UnlockResult>?) -> Boolean = { list ->
+                list?.any { it.status.isNotEmpty() && it.status != "reqfailed" && it.status != "na" } == true
+            }
+            return hasValidUnlock(media) || hasValidUnlock(ai)
+        }
 }
 
 @Serializable
@@ -60,7 +70,7 @@ data class UnlockResult(
     val label: String
         get() = when (status) {
             "unlock" -> if (!info.isNullOrEmpty()) info else if (!region.isNullOrEmpty()) "解锁($region)" else "解锁"
-            "pending" -> "待解锁"
+            "pending" -> if (platform == "netflix") "仅自制" else "待解锁"
             "senttocn" -> if (!region.isNullOrEmpty()) "送中($region)" else "送中"
             "failed" -> if (!region.isNullOrEmpty()) "失败($region)" else "失败"
             "reqfailed" -> "请求失败"

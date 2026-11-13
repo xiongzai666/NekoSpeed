@@ -54,6 +54,10 @@ class NekoSpeedService : Service() {
                 val concurrency = intent.getIntExtra(EXTRA_CONCURRENCY, 1)
                 val pingCount = intent.getIntExtra(EXTRA_PING_COUNT, 4)
                 val filter = intent.getStringExtra(EXTRA_FILTER)
+                val exclude = intent.getStringExtra(EXTRA_EXCLUDE)
+                val sortBy = intent.getStringExtra(EXTRA_SORT_BY)
+                val maxMB = intent.getIntExtra(EXTRA_MAX_MB, 0)
+                val preflight = intent.getBooleanExtra(EXTRA_PREFLIGHT, true)
 
                 NekoSpeedServiceBus.reset()
                 startForeground(NOTIFICATION_ID, buildNotification("准备运行...", true))
@@ -64,7 +68,11 @@ class NekoSpeedService : Service() {
                     duration = duration,
                     concurrency = concurrency,
                     pingCount = pingCount,
-                    filter = filter
+                    filter = filter,
+                    exclude = exclude,
+                    sortBy = sortBy,
+                    maxMB = maxMB,
+                    preflight = preflight
                 )
             }
             ACTION_CANCEL -> {
@@ -84,7 +92,11 @@ class NekoSpeedService : Service() {
         duration: Int,
         concurrency: Int,
         pingCount: Int,
-        filter: String?
+        filter: String?,
+        exclude: String?,
+        sortBy: String?,
+        maxMB: Int,
+        preflight: Boolean
     ) {
         job = serviceScope.launch {
             try {
@@ -104,6 +116,10 @@ class NekoSpeedService : Service() {
                     concurrency = concurrency,
                     pingCount = pingCount,
                     filter = filter,
+                    exclude = exclude,
+                    sortBy = sortBy,
+                    maxMB = maxMB,
+                    preflight = preflight,
                     onLog = { line ->
                         NekoSpeedServiceBus.appendLog(line)
                     }
@@ -220,6 +236,10 @@ class NekoSpeedService : Service() {
         const val EXTRA_CONCURRENCY = "concurrency"
         const val EXTRA_PING_COUNT = "ping_count"
         const val EXTRA_FILTER = "filter"
+        const val EXTRA_EXCLUDE = "exclude"
+        const val EXTRA_SORT_BY = "sort_by"
+        const val EXTRA_MAX_MB = "max_mb"
+        const val EXTRA_PREFLIGHT = "preflight"
 
         private const val CHANNEL_ID = "nekospeed_service_channel"
         private const val NOTIFICATION_ID = 1001
@@ -232,7 +252,11 @@ class NekoSpeedService : Service() {
             duration: Int,
             concurrency: Int,
             pingCount: Int,
-            filter: String?
+            filter: String?,
+            exclude: String? = null,
+            sortBy: String? = null,
+            maxMB: Int = 0,
+            preflight: Boolean = true
         ): Intent {
             return Intent(context, NekoSpeedService::class.java).apply {
                 action = ACTION_START
@@ -243,6 +267,10 @@ class NekoSpeedService : Service() {
                 putExtra(EXTRA_CONCURRENCY, concurrency)
                 putExtra(EXTRA_PING_COUNT, pingCount)
                 putExtra(EXTRA_FILTER, filter)
+                putExtra(EXTRA_EXCLUDE, exclude)
+                putExtra(EXTRA_SORT_BY, sortBy)
+                putExtra(EXTRA_MAX_MB, maxMB)
+                putExtra(EXTRA_PREFLIGHT, preflight)
             }
         }
     }

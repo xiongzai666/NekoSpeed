@@ -324,6 +324,50 @@ fun InputScreen(
                             placeholder = { Text("HK|Japan") },
                             singleLine = true
                         )
+
+                        OutlinedTextField(
+                            value = input.exclude,
+                            onValueChange = { viewModel.updateInput { copy(exclude = it) } },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("排除节点（正则，可选）") },
+                            placeholder = { Text("官网|过期|剩余流量") },
+                            singleLine = true
+                        )
+
+                        NumericField(
+                            label = "单节点流量上限(MB, 0=不限)",
+                            value = input.maxMB,
+                            fallback = 0,
+                            onValueChange = { viewModel.updateInput { copy(maxMB = it.coerceAtLeast(0)) } },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Text(
+                            text = "结果排序与测前探测",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                "" to "订阅原序",
+                                "speed" to "速度降序",
+                                "latency" to "延迟升序"
+                            ).forEach { (key, label) ->
+                                FilterChip(
+                                    selected = input.sortBy == key,
+                                    onClick = { viewModel.updateInput { copy(sortBy = key) } },
+                                    label = { Text(label) }
+                                )
+                            }
+                            FilterChip(
+                                selected = input.preflight,
+                                onClick = { viewModel.updateInput { copy(preflight = !preflight) } },
+                                label = { Text("测前域名探测") }
+                            )
+                        }
                     }
                 }
             }
@@ -366,12 +410,13 @@ private fun NumericField(
     label: String,
     value: Int,
     onValueChange: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    fallback: Int = 1
 ) {
     OutlinedTextField(
         value = value.toString(),
         onValueChange = {
-            val number = it.toIntOrNull() ?: 1
+            val number = it.toIntOrNull() ?: fallback
             onValueChange(number)
         },
         modifier = modifier,

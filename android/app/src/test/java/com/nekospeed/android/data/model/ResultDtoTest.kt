@@ -115,4 +115,23 @@ class ResultDtoTest {
         assertEquals(1, result.topology?.outbounds?.size)
         assertEquals("HK", result.topology?.inbounds?.firstOrNull()?.geo?.country)
     }
+
+    @Test
+    fun `dead node without error is not OK and netflix pending label matches Go`() {
+        val dead = NodeResult(
+            index = 3,
+            name = "Dead Node",
+            type = "vmess",
+            server = "dead.example.com",
+            inbound = GeoInfo(ip = "1.2.3.4"),
+            media = listOf(UnlockResult(platform = "youtube", status = "reqfailed"))
+        )
+        assertTrue(!dead.isOK)
+
+        val nfPending = UnlockResult(platform = "netflix", status = "pending")
+        assertEquals("仅自制", nfPending.label)
+
+        val otherPending = UnlockResult(platform = "youtube", status = "pending")
+        assertEquals("待解锁", otherPending.label)
+    }
 }
