@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/encoding/simplifiedchinese"
 	"nekospeed/internal/model"
 )
 
@@ -427,5 +428,131 @@ func TestResolveOutboundCFTraceSkipsDomesticAndCachesMeta(t *testing.T) {
 	}
 	if metaHits.Load() != 1 {
 		t.Errorf("同出口 IP 元数据补全应命中缓存去重, 实际请求 %d 次", metaHits.Load())
+	}
+}
+
+func TestLookupPCOnlineGBKAndYitong(t *testing.T) {
+	gbkBytes, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(`{"ip":"120.242.231.100","pro":"安徽省","city":"安庆市","addr":"安徽省安庆市 移通"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(gbkBytes)
+	}))
+	t.Cleanup(pcSrv.Close)
+
+	oldPC := pconlineBaseURL
+	pconlineBaseURL = pcSrv.URL
+	t.Cleanup(func() { pconlineBaseURL = oldPC })
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	g, err := r.lookupPCOnline(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("lookupPCOnline 失败: %v", err)
+	}
+	if g.IP != "120.242.231.100" || g.Country != "CN" || g.Region != "安徽省" || g.City != "安庆市" || g.ISP != "中国移动" {
+		t.Errorf("lookupPCOnline = %+v", g)
+	}
+}
+
+func TestLookupLocalNetworkPrefersDomesticPrecisionWithIP(t *testing.T) {
+	gbkBytes, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(`{"ip":"120.242.231.100","pro":"安徽省","city":"安庆市","addr":"安徽省安庆市 移通"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(gbkBytes)
+	}))
+	t.Cleanup(pcSrv.Close)
+
+	czSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.URL.Query().Get("ip")
+		if ip == "" {
+			fmt.Fprint(w, `{"code":5001,"success":false,"message":"Required String parameter 'ip' is not present"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"code":200,"success":true,"data":{"ip":%q,"countryCode":"CN","country":"中国","province":"安徽","city":"安庆","districts":"桐城市","isp":"中国移动","asn":"AS9808"}}`, ip)
+	}))
+	t.Cleanup(czSrv.Close)
+
+	oldPC, oldCZ := pconlineBaseURL, cz88BaseURL
+	pconlineBaseURL, cz88BaseURL = pcSrv.URL, czSrv.URL
+	t.Cleanup(func() { pconlineBaseURL, cz88BaseURL = oldPC, oldCZ })
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	g := r.LookupLocalNetwork(context.Background())
+	if g.IP != "120.242.231.100" || g.Country != "CN" || g.Region != "安徽" || g.City != "安庆桐城" || g.ISP != "中国移动" {
+		t.Errorf("LookupLocalNetwork = %+v", g)
+	}
+}
+
+func TestGeoCooldownDistrictSplitAndASNFill(t *testing.T) {
+	czSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":200,"success":true,"data":{"ip":"120.242.231.100","countryCode":"CN","country":"中国","province":"安徽","city":"合肥","districts":"市辖区","isp":"中国移动","asn":"CHINAMOBILE-CN"}}`)
+	}))
+	t.Cleanup(czSrv.Close)
+
+	ipsbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ip":"120.242.231.100","country_code":"CN","region":"Anhui","city":"Hefei","asn":9808,"asn_organization":"China Mobile","isp":"China Mobile"}`)
+	}))
+	t.Cleanup(ipsbSrv.Close)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"success","countryCode":"CN","regionName":"安徽","city":"合肥市","query":"120.242.231.100","as":"AS9808 China Mobile","org":"China Mobile","isp":"China Mobile"}`)
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	oldCZ, oldIPSB, oldAPI := cz88BaseURL, ipsbBaseURL, ipAPIBaseURL
+	cz88BaseURL, ipsbBaseURL, ipAPIBaseURL = czSrv.URL, ipsbSrv.URL, apiSrv.URL
+	t.Cleanup(func() { cz88BaseURL, ipsbBaseURL, ipAPIBaseURL = oldCZ, oldIPSB, oldAPI })
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	// 1. 市辖区过滤 + 在线 ASN 补全
+	g := r.Lookup(context.Background(), "120.242.231.100", nil)
+	if g.City != "合肥" || g.ASN != "AS9808" || g.ISP != "中国移动" {
+		t.Errorf("Lookup = %+v, 期望 City=合肥 ASN=AS9808", g)
+	}
+
+	// 2. 百度省市拆分
+	reg, city := splitBaiduLoc("安徽省安庆市")
+	if reg != "安徽省" || city != "安庆市" {
+		t.Errorf("splitBaiduLoc = (%q, %q)", reg, city)
+	}
+
+	// 3. 冷却与业务拒绝区分
+	r.markSourceFailed("ipwhois", "https://ipwho.is")
+	if !r.isSourceCooling("ipwhois") {
+		t.Error("非本地源失败后应进入冷却")
+	}
+	r.clearSourceFailed("ipwhois")
+	if r.isSourceCooling("ipwhois") {
+		t.Error("clearSourceFailed 后不应继续冷却")
+	}
+	if isTransientSourceErr(fmt.Errorf("pconline 非中国大陆 IP: 美国")) {
+		t.Error("海外拒绝错误不应触发源冷却")
+	}
+
+	// 4. mergeGeoMissing 保留主来源已有字段并补全缺失字段
+	merged := mergeGeoMissing(
+		model.GeoInfo{IP: "1.1.1.1", Stack: "4", Country: "CN", City: "安庆桐城"},
+		model.GeoInfo{Country: "US", City: "Guangzhou", ASN: "AS9808", Org: "CMCC", ISP: "中国移动"},
+	)
+	if merged.Country != "CN" || merged.City != "安庆桐城" || merged.ASN != "AS9808" || merged.ISP != "中国移动" {
+		t.Errorf("mergeGeoMissing = %+v", merged)
 	}
 }

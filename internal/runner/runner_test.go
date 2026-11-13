@@ -19,6 +19,8 @@ func TestFormatLocalISP(t *testing.T) {
 		{model.GeoInfo{City: "上海", ISP: "China Telecom"}, "上海电信"},
 		{model.GeoInfo{City: "深圳", ISP: "China Unicom"}, "深圳联通"},
 		{model.GeoInfo{Region: "陕西", ISP: "China Mobile"}, "陕西移动"},
+		{model.GeoInfo{Region: "安徽省", ISP: "中国移动"}, "安徽移动"},
+		{model.GeoInfo{City: "安庆桐城", ISP: "中国移动"}, "安庆桐城移动"},
 		{model.GeoInfo{City: "北京", ISP: "中国电信"}, "北京电信"},
 		{model.GeoInfo{City: "广州", ISP: "China Broadcasting Network"}, "广州广电"},
 		{model.GeoInfo{City: "上海", ISP: ""}, "上海"},

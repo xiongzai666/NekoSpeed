@@ -865,7 +865,9 @@ func formatLocalISP(g model.GeoInfo) string {
 	if loc == "" {
 		return ""
 	}
-	loc = strings.TrimSuffix(loc, "市")
+	for _, suf := range []string{"市", "省", "特别行政区", "自治区"} {
+		loc = strings.TrimSuffix(loc, suf)
+	}
 	isp := g.ISP
 	if isp == "" {
 		isp = g.Org
