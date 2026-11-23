@@ -645,6 +645,9 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 		meta := r.lookupCached(ctx, cfGeo.IP, nil, skipDomestic)
 
 		out := cfGeo
+		if out.Country == "" && meta.Country != "" {
+			out.Country = meta.Country
+		}
 		if meta.ASN != "" {
 			out.ASN = meta.ASN
 		}
@@ -654,15 +657,14 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 		if meta.ISP != "" {
 			out.ISP = meta.ISP
 		}
-		if meta.City != "" {
-			out.City = meta.City
-		}
-		// 若 MMDB 或 API 查出来的 Country 与 Cloudflare 一致，保留省份/地区
-		if meta.Country == cfGeo.Country && meta.Region != "" {
-			out.Region = meta.Region
-		} else if out.Region != "" && out.City == "" {
-			// 将 Cloudflare 的机房三字码 (PoP) 作为城市标注（如 "HKG"）
-			out.City = out.Region
+		// 仅当元数据国家未与实测落地国家冲突时采信城市与省区，禁止再用 CF 机房三字码冒充出口城市。
+		if meta.Country == "" || out.Country == "" || meta.Country == out.Country {
+			if meta.City != "" {
+				out.City = meta.City
+			}
+			if meta.Region != "" {
+				out.Region = meta.Region
+			}
 		}
 		return &out
 	}
@@ -1030,21 +1032,21 @@ func (r *Resolver) lookupPCOnlineWithIP(ctx context.Context, ip string, d model.
 	return g, rawIP, nil
 }
 
-// lookupCFTrace 经代理请求 Cloudflare Trace，获取实际出口 IP、国家与数据中心代号。
+// lookupCFTrace 经代理请求 Cloudflare Trace，获取实际出口 IP 与国家代码。
 func (r *Resolver) lookupCFTrace(ctx context.Context, d model.Dialer) (model.GeoInfo, error) {
 	bodyBytes, err := r.doGet(ctx, cfTraceURL, "Mozilla/5.0 NekoSpeed/1.0", d, 64*1024)
 	if err != nil {
 		return model.GeoInfo{}, err
 	}
-	ip, loc, colo := parseCFTrace(string(bodyBytes))
+	ip, loc, _ := parseCFTrace(string(bodyBytes))
 	if ip == "" || net.ParseIP(ip) == nil {
 		return model.GeoInfo{}, fmt.Errorf("cf-trace 未找到有效 IP")
 	}
+	// colo 仅为 Cloudflare 就近 PoP 机房代号，不写入 Region/City 避免冒充真实出口城市。
 	g := model.GeoInfo{
 		IP:      ip,
 		Stack:   stackOf(ip),
 		Country: strings.ToUpper(strings.TrimSpace(loc)),
-		Region:  strings.ToUpper(strings.TrimSpace(colo)),
 	}
 	return g, nil
 }

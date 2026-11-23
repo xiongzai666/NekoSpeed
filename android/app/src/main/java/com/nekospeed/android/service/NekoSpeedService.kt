@@ -51,7 +51,7 @@ class NekoSpeedService : Service() {
                 val tests = intent.getStringArrayListExtra(EXTRA_TESTS) ?: TestType.ALL
                 val threads = intent.getIntExtra(EXTRA_THREADS, 8)
                 val duration = intent.getIntExtra(EXTRA_DURATION, 10)
-                val concurrency = intent.getIntExtra(EXTRA_CONCURRENCY, 1)
+                val concurrency = intent.getIntExtra(EXTRA_CONCURRENCY, 4)
                 val pingCount = intent.getIntExtra(EXTRA_PING_COUNT, 4)
                 val filter = intent.getStringExtra(EXTRA_FILTER)
                 val exclude = intent.getStringExtra(EXTRA_EXCLUDE)

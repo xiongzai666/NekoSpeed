@@ -441,6 +441,91 @@ func TestResolveOutboundCFTraceSkipsDomesticAndCachesMeta(t *testing.T) {
 	}
 }
 
+func TestResolveOutboundCFTraceDoesNotLeakColoAsCity(t *testing.T) {
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(failSrv.Close)
+
+	cfSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ip=198.51.100.77\nloc=VN\ncolo=HKG\n")
+	}))
+	t.Cleanup(cfSrv.Close)
+
+	t.Run("EmptyCityKeepsEmpty", func(t *testing.T) {
+		whoisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"ip":"198.51.100.77","success":true,"country_code":"VN","region":"","city":"","connection":{"asn":45899,"org":"VNPT Corp","isp":"VNPT"}}`)
+		}))
+		t.Cleanup(whoisSrv.Close)
+
+		oldCZ, oldBD, oldPC, oldMir6, oldCF, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, cfTraceURL, ipwhoisBaseURL
+		oldAPI, oldIPSB, oldGeoJS := ipAPIBaseURL, ipsbBaseURL, geojsBaseURL
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = failSrv.URL, failSrv.URL, failSrv.URL, failSrv.URL
+		cfTraceURL, ipwhoisBaseURL = cfSrv.URL, whoisSrv.URL
+		ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = failSrv.URL, failSrv.URL, failSrv.URL
+		t.Cleanup(func() {
+			cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = oldCZ, oldBD, oldPC, oldMir6
+			cfTraceURL, ipwhoisBaseURL = oldCF, oldWhois
+			ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = oldAPI, oldIPSB, oldGeoJS
+		})
+
+		r, err := NewResolver("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+
+		out := r.resolveOutbound(context.Background(), nil)
+		if out == nil {
+			t.Fatal("resolveOutbound 返回 nil")
+		}
+		if out.Country != "VN" {
+			t.Errorf("期望 Country=VN, 得到 %q", out.Country)
+		}
+		if out.City != "" || out.Region != "" {
+			t.Errorf("colo 不得冒充城市或省区, 期望 City='' Region='', 得到 City=%q Region=%q", out.City, out.Region)
+		}
+		if out.ASN != "AS45899" {
+			t.Errorf("期望补全 ASN=AS45899, 得到 %q", out.ASN)
+		}
+	})
+
+	t.Run("MismatchedMetaCountryDoesNotPolluteCity", func(t *testing.T) {
+		whoisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"ip":"198.51.100.77","success":true,"country_code":"HK","region":"Hong Kong","city":"Hong Kong","connection":{"asn":45899,"org":"VNPT Corp","isp":"VNPT"}}`)
+		}))
+		t.Cleanup(whoisSrv.Close)
+
+		oldCZ, oldBD, oldPC, oldMir6, oldCF, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, cfTraceURL, ipwhoisBaseURL
+		oldAPI, oldIPSB, oldGeoJS := ipAPIBaseURL, ipsbBaseURL, geojsBaseURL
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = failSrv.URL, failSrv.URL, failSrv.URL, failSrv.URL
+		cfTraceURL, ipwhoisBaseURL = cfSrv.URL, whoisSrv.URL
+		ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = failSrv.URL, failSrv.URL, failSrv.URL
+		t.Cleanup(func() {
+			cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = oldCZ, oldBD, oldPC, oldMir6
+			cfTraceURL, ipwhoisBaseURL = oldCF, oldWhois
+			ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = oldAPI, oldIPSB, oldGeoJS
+		})
+
+		r, err := NewResolver("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Close()
+
+		out := r.resolveOutbound(context.Background(), nil)
+		if out == nil {
+			t.Fatal("resolveOutbound 返回 nil")
+		}
+		if out.Country != "VN" {
+			t.Errorf("期望 Country=VN, 得到 %q", out.Country)
+		}
+		if out.City != "" || out.Region != "" {
+			t.Errorf("国家冲突的元数据不应污染 City/Region, 得到 City=%q Region=%q", out.City, out.Region)
+		}
+	})
+}
+
 func TestLookupPCOnlineGBKAndYitong(t *testing.T) {
 	gbkBytes, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(`{"ip":"120.242.231.100","pro":"安徽省","city":"安庆市","addr":"安徽省安庆市 移通"}`))
 	if err != nil {
@@ -810,5 +895,146 @@ func TestUpdateDBsFallbackAndValidation(t *testing.T) {
 	}
 	if b, readErr := os.ReadFile(filepath.Join(dir, geoCNFileName)); readErr != nil || len(b) != len(validMMDB) {
 		t.Fatalf("损坏响应不得覆盖原有合法 %s", geoCNFileName)
+	}
+}
+
+func TestDefaultDBDirPriorityAndPortableFallback(t *testing.T) {
+	// 1. 环境变量优先级最高
+	t.Setenv("NEKOSPEED_GEOIP_DIR", "/custom/geoip-dir")
+	if got := DefaultDBDir(); got != "/custom/geoip-dir" {
+		t.Fatalf("NEKOSPEED_GEOIP_DIR 覆盖失效: got %q", got)
+	}
+	t.Setenv("NEKOSPEED_GEOIP_DIR", "")
+
+	// 2. 当前工作目录存在 geoip/ 时优先返回 "geoip"
+	cwdWithGeo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdWithGeo, "geoip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwdWithGeo)
+	if got := DefaultDBDir(); got != "geoip" {
+		t.Fatalf("CWD 存在 geoip 目录时期望返回 \"geoip\", 实际 %q", got)
+	}
+
+	// 3. 切换至无 geoip 的 CWD，验证临时测试二进制（os.TempDir / go-build）被跳过
+	cwdEmpty := t.TempDir()
+	t.Chdir(cwdEmpty)
+	if got := DefaultDBDir(); got != "geoip" {
+		t.Fatalf("测试二进制应跳过 exeDir 回退并返回 \"geoip\", 实际 %q", got)
+	}
+
+	// 4. 模拟便携版可执行文件从其他 CWD 启动：存在同级 <exeDir>/geoip
+	portableRoot := t.TempDir()
+	portableGeo := filepath.Join(portableRoot, "geoip")
+	if err := os.MkdirAll(portableGeo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeExe := filepath.Join(portableRoot, "nekospeed.exe")
+	gotSibling := resolveDefaultDBDir("", func() (string, error) { return fakeExe, nil }, filepath.Join(portableRoot, "unrelated-temp"))
+	if gotSibling != portableGeo {
+		t.Fatalf("便携版存在同级 geoip 时期望返回 %q, 实际 %q", portableGeo, gotSibling)
+	}
+
+	// 5. 模拟便携版首次运行（同级 geoip 尚未创建，但 exeDir 为有效便携安装目录）
+	freshRoot := t.TempDir()
+	freshExe := filepath.Join(freshRoot, "nekospeed.exe")
+	gotFresh := resolveDefaultDBDir("", func() (string, error) { return freshExe, nil }, filepath.Join(freshRoot, "unrelated-temp"))
+	if want := filepath.Join(freshRoot, "geoip"); gotFresh != want {
+		t.Fatalf("便携安装目录首次运行期望返回 %q, 实际 %q", want, gotFresh)
+	}
+
+	// 6. go-build 或 temp 目录内可执行文件应被跳过
+	gotGoBuild := resolveDefaultDBDir("", func() (string, error) {
+		return filepath.Join(portableRoot, "go-build1234", "b001", "nekospeed.exe"), nil
+	}, filepath.Join(portableRoot, "unrelated-temp"))
+	if gotGoBuild != "geoip" {
+		t.Fatalf("go-build 路径应跳过 exeDir 回退, 实际 %q", gotGoBuild)
+	}
+	gotTemp := resolveDefaultDBDir("", func() (string, error) { return fakeExe, nil }, portableRoot)
+	if gotTemp != "geoip" {
+		t.Fatalf("TempDir 内路径应跳过 exeDir 回退, 实际 %q", gotTemp)
+	}
+}
+
+func TestUpdateDBsParallelAndPartialFailure(t *testing.T) {
+	validMMDB := minimalTestMMDB()
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	allThreeStarted := make(chan struct{})
+	var startedCount atomic.Int32
+
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(relSrv.Close)
+
+	upSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := active.Add(1)
+		for {
+			prev := maxActive.Load()
+			if cur <= prev || maxActive.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		defer active.Add(-1)
+
+		if startedCount.Add(1) == 3 {
+			close(allThreeStarted)
+		}
+		select {
+		case <-allThreeStarted:
+		case <-time.After(1500 * time.Millisecond):
+		}
+
+		if strings.Contains(r.URL.Path, "fail-city") {
+			http.Error(w, "city unavailable", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write(validMMDB)
+	}))
+	t.Cleanup(upSrv.Close)
+
+	oldRel, oldCN, oldCity, oldASN, oldIPinfo := GeoIPReleaseBaseURL, GeoCNUpstreamURL, GeoLiteCityUpstreamURL, GeoLiteASNUpstreamURL, IPinfoLiteDownloadBaseURL
+	GeoIPReleaseBaseURL = relSrv.URL
+	GeoCNUpstreamURL = upSrv.URL + "/GeoCN.mmdb"
+	GeoLiteASNUpstreamURL = upSrv.URL + "/GeoLite2-ASN.mmdb"
+	GeoLiteCityUpstreamURL = upSrv.URL + "/fail-city/GeoLite2-City.mmdb"
+	IPinfoLiteDownloadBaseURL = upSrv.URL + "/ipinfo_lite.mmdb"
+	t.Cleanup(func() {
+		GeoIPReleaseBaseURL, GeoCNUpstreamURL, GeoLiteCityUpstreamURL, GeoLiteASNUpstreamURL, IPinfoLiteDownloadBaseURL = oldRel, oldCN, oldCity, oldASN, oldIPinfo
+	})
+
+	var progressDone []int
+	dir := t.TempDir()
+	res, err := UpdateDBs(context.Background(), UpdateOptions{
+		Dir: dir,
+		OnProgress: func(stage string, done, total int) {
+			if total != 3 {
+				t.Errorf("OnProgress total = %d, 期望 3", total)
+			}
+			progressDone = append(progressDone, done)
+		},
+	})
+	if err != nil {
+		t.Fatalf("部分失败（2/3 成功）时不应返回 error: %v", err)
+	}
+	if maxActive.Load() < 2 {
+		t.Errorf("期望 3 个数据库并发下载 (maxActive >= 2), 实际 maxActive = %d", maxActive.Load())
+	}
+	if len(res.Updated) != 2 || len(res.Failed) != 1 {
+		t.Fatalf("部分更新结果异常: updated=%v failed=%v", res.Updated, res.Failed)
+	}
+	if res.Status.Mode != "hybrid" || !res.Status.Ready || res.Status.FullReady {
+		t.Fatalf("部分更新后状态期望 hybrid, 实际 %+v", res.Status)
+	}
+	// 期望单调进度 0 -> 1 -> 2 -> 3 -> 3
+	if len(progressDone) < 4 || progressDone[0] != 0 || progressDone[len(progressDone)-1] != 3 {
+		t.Fatalf("OnProgress 进度序列异常: %v", progressDone)
+	}
+	for i := 1; i < len(progressDone); i++ {
+		if progressDone[i] < progressDone[i-1] {
+			t.Fatalf("OnProgress 进度未单调递增: %v", progressDone)
+		}
 	}
 }

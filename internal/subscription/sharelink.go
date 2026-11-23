@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -287,16 +288,9 @@ func parseVmess(body string) (model.Node, error) {
 
 	network := jsonStr(v, "net")
 	switch network {
-	case "ws":
+	case "ws", "httpupgrade":
 		raw["network"] = "ws"
-		wsOpts := map[string]any{}
-		if p := jsonStr(v, "path"); p != "" {
-			wsOpts["path"] = p
-		}
-		if h := jsonStr(v, "host"); h != "" {
-			wsOpts["headers"] = map[string]any{"Host": h}
-		}
-		if len(wsOpts) > 0 {
+		if wsOpts := buildWSOpts(jsonStr(v, "path"), jsonStr(v, "host"), network == "httpupgrade"); len(wsOpts) > 0 {
 			raw["ws-opts"] = wsOpts
 		}
 	case "grpc":
@@ -306,14 +300,7 @@ func parseVmess(body string) (model.Node, error) {
 		}
 	case "h2", "http":
 		raw["network"] = "h2"
-		h2Opts := map[string]any{}
-		if h := jsonStr(v, "host"); h != "" {
-			h2Opts["host"] = splitComma(h)
-		}
-		if p := jsonStr(v, "path"); p != "" {
-			h2Opts["path"] = p
-		}
-		if len(h2Opts) > 0 {
+		if h2Opts := buildH2Opts(jsonStr(v, "path"), jsonStr(v, "host")); len(h2Opts) > 0 {
 			raw["h2-opts"] = h2Opts
 		}
 	case "", "tcp":
@@ -340,11 +327,13 @@ func parseURLLink(typ, line string) (model.Node, error) {
 	raw := map[string]any{
 		"name": u.Fragment, "type": typ, "server": host,
 	}
-	// hysteria/hysteria2 支持端口段（如 443 或留空走 ports），其余协议端口必须是数字
+	// hysteria/hysteria2 支持端口段（如 443 或通过 mport 走端口跳跃），其余协议端口必须是数字
 	if port, err := strconv.Atoi(portStr); err == nil {
 		raw["port"] = port
-	} else if (typ == "hysteria2" || typ == "hysteria") && portStr != "" {
-		raw["ports"] = portStr
+	} else if (typ == "hysteria2" || typ == "hysteria") && (portStr != "" || q.Get("mport") != "") {
+		if portStr != "" {
+			raw["ports"] = portStr
+		}
 	} else {
 		return model.Node{}, fmt.Errorf("%s 链接端口无效: %q", typ, portStr)
 	}
@@ -485,7 +474,7 @@ func fillAnyTLS(raw map[string]any, u *url.URL, q url.Values) {
 	raw["udp"] = true
 }
 
-// fillHysteria2 填充 hysteria2 字段：password/sni/obfs/obfs-password 等。
+// fillHysteria2 填充 hysteria2 字段：password/sni/obfs/obfs-password/ports/fingerprint 等。
 func fillHysteria2(raw map[string]any, u *url.URL, q url.Values) {
 	if u.User != nil {
 		// userinfo 形如 password 或 auth:password，mihomo 只需要密码本体
@@ -498,8 +487,16 @@ func fillHysteria2(raw map[string]any, u *url.URL, q url.Values) {
 	if sni := q.Get("sni"); sni != "" {
 		raw["sni"] = sni
 	}
-	if boolish(q.Get("insecure")) {
+	if boolish(q.Get("insecure")) || boolish(q.Get("allowInsecure")) || boolish(q.Get("allow_insecure")) {
 		raw["skip-cert-verify"] = true
+	}
+	if mport := q.Get("mport"); mport != "" {
+		raw["ports"] = mport
+	}
+	if pin := q.Get("pinSHA256"); pin != "" {
+		raw["fingerprint"] = normalizePinSHA256(pin)
+	} else if pin := q.Get("pinsha256"); pin != "" {
+		raw["fingerprint"] = normalizePinSHA256(pin)
 	}
 	if obfs := q.Get("obfs"); obfs != "" {
 		raw["obfs"] = obfs
@@ -510,6 +507,22 @@ func fillHysteria2(raw map[string]any, u *url.URL, q url.Values) {
 	if alpn := q.Get("alpn"); alpn != "" {
 		raw["alpn"] = splitComma(alpn)
 	}
+}
+
+func normalizePinSHA256(pin string) string {
+	pin = strings.TrimSpace(pin)
+	lower := strings.ToLower(pin)
+	if strings.HasPrefix(lower, "sha256/") {
+		rest := strings.TrimSpace(pin[len("sha256/"):])
+		if b, err := base64DecodeAny(rest); err == nil && len(b) == 32 {
+			return hex.EncodeToString(b)
+		}
+		return rest
+	}
+	if strings.HasPrefix(lower, "sha256:") {
+		return strings.TrimSpace(pin[len("sha256:"):])
+	}
+	return pin
 }
 
 // fillTuic 填充 tuic 字段：uuid/password/congestion-controller/udp-relay-mode 等。
@@ -552,19 +565,14 @@ func fillSnell(raw map[string]any, u *url.URL, q url.Values) {
 	}
 }
 
-// fillNetwork 把 URL query 的 type=ws/grpc 等传输层参数映射为 clash 字段。
+// fillNetwork 把 URL query 的 type=ws/httpupgrade/grpc/h2 等传输层参数映射为 clash 字段。
+// mihomo 中 httpupgrade 通过 network="ws" + ws-opts.v2ray-http-upgrade=true 表示。
 func fillNetwork(raw map[string]any, q url.Values) {
-	switch q.Get("type") {
-	case "ws":
+	typ := q.Get("type")
+	switch typ {
+	case "ws", "httpupgrade":
 		raw["network"] = "ws"
-		wsOpts := map[string]any{}
-		if p := q.Get("path"); p != "" {
-			wsOpts["path"] = p
-		}
-		if h := q.Get("host"); h != "" {
-			wsOpts["headers"] = map[string]any{"Host": h}
-		}
-		if len(wsOpts) > 0 {
+		if wsOpts := buildWSOpts(q.Get("path"), q.Get("host"), typ == "httpupgrade"); len(wsOpts) > 0 {
 			raw["ws-opts"] = wsOpts
 		}
 	case "grpc":
@@ -578,11 +586,39 @@ func fillNetwork(raw map[string]any, q url.Values) {
 		}
 	case "http", "h2":
 		raw["network"] = "h2"
+		if h2Opts := buildH2Opts(q.Get("path"), q.Get("host")); len(h2Opts) > 0 {
+			raw["h2-opts"] = h2Opts
+		}
 	case "tcp", "":
 		// 默认 tcp，无需设置 network
 	default:
-		raw["network"] = q.Get("type")
+		raw["network"] = typ
 	}
+}
+
+func buildWSOpts(path, host string, httpUpgrade bool) map[string]any {
+	wsOpts := map[string]any{}
+	if httpUpgrade {
+		wsOpts["v2ray-http-upgrade"] = true
+	}
+	if path != "" {
+		wsOpts["path"] = path
+	}
+	if host != "" {
+		wsOpts["headers"] = map[string]any{"Host": host}
+	}
+	return wsOpts
+}
+
+func buildH2Opts(path, host string) map[string]any {
+	h2Opts := map[string]any{}
+	if host != "" {
+		h2Opts["host"] = splitComma(host)
+	}
+	if path != "" {
+		h2Opts["path"] = path
+	}
+	return h2Opts
 }
 
 // jsonStr 取 JSON map 的字符串字段。

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,12 +30,108 @@ const (
 	geoLiteCityName    = "GeoLite2-City.mmdb"
 )
 
-// DefaultDBDir 返回离线 GeoIP 数据库目录，可通过 NEKOSPEED_GEOIP_DIR 覆盖，默认工作目录下的 geoip/。
+var osExecutable = os.Executable
+
+// DefaultDBDir 返回离线 GeoIP 数据库目录，优先级如下：
+//  1. 环境变量 NEKOSPEED_GEOIP_DIR（非空时直接返回）；
+//  2. 当前工作目录下已存在的 geoip/ 目录（返回 "geoip"）；
+//  3. 可执行文件同级目录（排除 os.TempDir() / go-build / .test 等临时或测试二进制）：
+//     若 <exeDir>/geoip 已存在或 <exeDir> 为有效的便携安装目录，返回 <exeDir>/geoip；
+//  4. 其余情况回退返回 "geoip"。
 func DefaultDBDir() string {
-	if d := strings.TrimSpace(os.Getenv("NEKOSPEED_GEOIP_DIR")); d != "" {
+	return resolveDefaultDBDir(os.Getenv("NEKOSPEED_GEOIP_DIR"), osExecutable, os.TempDir())
+}
+
+func resolveDefaultDBDir(envDir string, exeFn func() (string, error), tempDir string) string {
+	if d := strings.TrimSpace(envDir); d != "" {
 		return d
 	}
+	if isExistingDir("geoip") {
+		return "geoip"
+	}
+	if exeFn != nil {
+		if exe, err := exeFn(); err == nil && strings.TrimSpace(exe) != "" && !isTempOrTestExecutable(exe, tempDir) {
+			exeDir := filepath.Dir(filepath.Clean(exe))
+			sibling := filepath.Join(exeDir, "geoip")
+			if isExistingDir(sibling) || isPortableInstallDir(exeDir) {
+				return sibling
+			}
+		}
+	}
 	return "geoip"
+}
+
+func isExistingDir(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
+}
+
+func isTempOrTestExecutable(exe, tempDir string) bool {
+	cleanExe := filepath.Clean(exe)
+	lowerExe := strings.ToLower(cleanExe)
+	lowerBase := strings.ToLower(filepath.Base(cleanExe))
+	if strings.Contains(lowerExe, "go-build") ||
+		strings.HasSuffix(lowerBase, ".test") ||
+		strings.HasSuffix(lowerBase, ".test.exe") {
+		return true
+	}
+	return isPathUnder(cleanExe, tempDir)
+}
+
+func isPathUnder(path, dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return false
+	}
+	check := func(p, d string) bool {
+		cp := filepath.Clean(p)
+		cd := filepath.Clean(d)
+		if runtime.GOOS == "windows" {
+			cp = strings.ToLower(cp)
+			cd = strings.ToLower(cd)
+		}
+		rel, err := filepath.Rel(cd, cp)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	if check(path, dir) {
+		return true
+	}
+	if rp, err := filepath.EvalSymlinks(path); err == nil {
+		if rd, err2 := filepath.EvalSymlinks(dir); err2 == nil && check(rp, rd) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPortableInstallDir(exeDir string) bool {
+	if !isExistingDir(exeDir) {
+		return false
+	}
+	clean := filepath.Clean(exeDir)
+	if clean == "." || filepath.Dir(clean) == clean {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		lower := strings.ToLower(clean)
+		for _, envKey := range []string{"SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)"} {
+			if sysDir := strings.TrimSpace(os.Getenv(envKey)); sysDir != "" && isPathUnder(clean, sysDir) {
+				return false
+			}
+		}
+		if strings.HasSuffix(lower, `\windows\system32`) || strings.HasSuffix(lower, `\windows`) {
+			return false
+		}
+		return true
+	}
+	switch clean {
+	case "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/opt/homebrew/bin":
+		return false
+	}
+	return true
 }
 
 func loadCNDivisions() map[uint32]string {

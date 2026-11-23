@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/metacubex/mihomo/adapter"
 )
 
 func b64(s string) string {
@@ -765,5 +772,151 @@ func TestShouldFallbackDirectPhysical(t *testing.T) {
 
 	if shouldFallbackDirectPhysical("https://api.example.com/sub", true, withEnvProxy) {
 		t.Error("命中环境变量代理时不应绕过代理直连")
+	}
+}
+
+func TestLoadContextPerCallProxyAndCancel(t *testing.T) {
+	if err := SetProxy(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetProxy("") })
+
+	var sawProxy atomic.Bool
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawProxy.Store(true)
+		w.Header().Set("Content-Type", "text/yaml")
+		_, _ = w.Write([]byte(testClashYAML))
+	}))
+	defer proxySrv.Close()
+
+	nodes, _, err := LoadContext(context.Background(), "http://sub.invalid/t", proxySrv.URL)
+	if err != nil {
+		t.Fatalf("LoadContext 经每调用代理失败: %v", err)
+	}
+	if !sawProxy.Load() || len(nodes) != 1 || nodes[0].Name != "test-ss" {
+		t.Fatalf("LoadContext 代理拉取异常: sawProxy=%v nodes=%+v", sawProxy.Load(), nodes)
+	}
+
+	// 全局 explicitProxy 与 proxyFn 不得被 LoadContext 污染
+	proxyMu.RLock()
+	stillExplicit := explicitProxy
+	proxyMu.RUnlock()
+	if stillExplicit {
+		t.Fatal("LoadContext 不应修改全局 explicitProxy")
+	}
+
+	// 非法代理应立即报错
+	if _, _, err := LoadContext(context.Background(), "http://sub.invalid/t", "ftp://127.0.0.1:21"); err == nil {
+		t.Fatal("LoadContext 对非法代理协议应报错")
+	}
+
+	// 上下文取消应中断退避等待（500 状态触发重试）
+	var hits atomic.Int32
+	slowFailSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer slowFailSrv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, err = LoadContext(ctx, slowFailSrv.URL+"/sub", "")
+	if err == nil {
+		t.Fatal("期望上下文超时返回错误")
+	}
+	if time.Since(start) > 1*time.Second {
+		t.Fatalf("LoadContext 取消退避耗时过长: %s", time.Since(start))
+	}
+	if hits.Load() >= fetchRetry {
+		t.Fatalf("取消后不应跑满全部 %d 次重试，实际请求 %d 次", fetchRetry, hits.Load())
+	}
+}
+
+func TestParseHysteria2ExtendedParams(t *testing.T) {
+	sum := sha256.Sum256([]byte("cert-der"))
+	pinB64 := "sha256/" + base64.StdEncoding.EncodeToString(sum[:])
+	wantHex := hex.EncodeToString(sum[:])
+
+	link := "hy2://pw@hy.example.com:443?mport=20000-30000&pinSHA256=" + url.QueryEscape(pinB64) + "&allowInsecure=1&sni=hy.example.com#hy2-ext"
+	n, err := ParseShareLink(link)
+	if err != nil {
+		t.Fatalf("ParseShareLink: %v", err)
+	}
+	if n.Raw["ports"] != "20000-30000" || n.Raw["fingerprint"] != wantHex || n.Raw["skip-cert-verify"] != true {
+		t.Fatalf("hysteria2 扩展字段解析异常: %+v", n.Raw)
+	}
+	if _, err := adapter.ParseProxy(n.Raw); err != nil {
+		t.Fatalf("mihomo ParseProxy 拒绝 hysteria2 扩展字段: %v", err)
+	}
+
+	// 仅 mport 且 allow_insecure=1，省略单端口
+	colonHex := "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+	linkNoPort := "hysteria2://pw@hy.example.com?mport=30000-31000&pinSHA256=" + url.QueryEscape(colonHex) + "&allow_insecure=1#hy2-mport"
+	n2, err := ParseShareLink(linkNoPort)
+	if err != nil {
+		t.Fatalf("ParseShareLink 无单端口 mport: %v", err)
+	}
+	if n2.Raw["ports"] != "30000-31000" || n2.Raw["fingerprint"] != colonHex || n2.Raw["skip-cert-verify"] != true {
+		t.Fatalf("hysteria2 mport/allow_insecure 字段异常: %+v", n2.Raw)
+	}
+	if _, err := adapter.ParseProxy(n2.Raw); err != nil {
+		t.Fatalf("mihomo ParseProxy 拒绝无单端口 mport hysteria2: %v", err)
+	}
+}
+
+func TestParseNetworkH2AndHTTPUpgrade(t *testing.T) {
+	uuid := "11111111-2222-3333-4444-555555555555"
+
+	// VLESS H2
+	h2Link := "vless://" + uuid + "@h2.example.com:443?security=tls&type=h2&path=%2Fh2path&host=a.example.com%2Cb.example.com#vl-h2"
+	nH2, err := ParseShareLink(h2Link)
+	if err != nil {
+		t.Fatalf("ParseShareLink h2: %v", err)
+	}
+	if nH2.Raw["network"] != "h2" {
+		t.Fatalf("h2 network = %v", nH2.Raw["network"])
+	}
+	h2Opts, ok := nH2.Raw["h2-opts"].(map[string]any)
+	if !ok || h2Opts["path"] != "/h2path" {
+		t.Fatalf("h2-opts 异常: %v", nH2.Raw["h2-opts"])
+	}
+	hosts, _ := h2Opts["host"].([]string)
+	if len(hosts) != 2 || hosts[0] != "a.example.com" || hosts[1] != "b.example.com" {
+		t.Fatalf("h2-opts host 异常: %v", h2Opts["host"])
+	}
+	if _, err := adapter.ParseProxy(nH2.Raw); err != nil {
+		t.Fatalf("mihomo ParseProxy 拒绝 vless h2: %v", err)
+	}
+
+	// VLESS HTTPUpgrade -> mihomo network=ws + ws-opts.v2ray-http-upgrade=true
+	upLink := "vless://" + uuid + "@up.example.com:443?security=tls&type=httpupgrade&path=%2Fup&host=cdn.example.com#vl-up"
+	nUp, err := ParseShareLink(upLink)
+	if err != nil {
+		t.Fatalf("ParseShareLink httpupgrade: %v", err)
+	}
+	if nUp.Raw["network"] != "ws" {
+		t.Fatalf("httpupgrade 应映射为 network=ws，实际 %v", nUp.Raw["network"])
+	}
+	wsOpts, ok := nUp.Raw["ws-opts"].(map[string]any)
+	if !ok || wsOpts["v2ray-http-upgrade"] != true || wsOpts["path"] != "/up" {
+		t.Fatalf("httpupgrade ws-opts 异常: %v", nUp.Raw["ws-opts"])
+	}
+	headers, _ := wsOpts["headers"].(map[string]any)
+	if headers["Host"] != "cdn.example.com" {
+		t.Fatalf("httpupgrade headers 异常: %v", wsOpts["headers"])
+	}
+	if _, err := adapter.ParseProxy(nUp.Raw); err != nil {
+		t.Fatalf("mihomo ParseProxy 拒绝 vless httpupgrade: %v", err)
+	}
+
+	// Trojan HTTPUpgrade
+	tjUpLink := "trojan://pass@tj.example.com:443?type=httpupgrade&path=%2Ftjup&host=tj.cdn.com#tj-up"
+	nTj, err := ParseShareLink(tjUpLink)
+	if err != nil {
+		t.Fatalf("ParseShareLink trojan httpupgrade: %v", err)
+	}
+	if _, err := adapter.ParseProxy(nTj.Raw); err != nil {
+		t.Fatalf("mihomo ParseProxy 拒绝 trojan httpupgrade: %v", err)
 	}
 }

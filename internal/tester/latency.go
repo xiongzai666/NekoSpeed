@@ -16,7 +16,7 @@ import (
 const defaultPingURL = "http://www.gstatic.com/generate_204"
 
 // pingTimeout 单次延迟测试超时。
-const pingTimeout = 10 * time.Second
+const pingTimeout = 6 * time.Second
 
 // Latency 通过代理向 pingURL 发起 count 次 HTTP 请求，用 httptrace 精确计时。
 // HTTPS：强制 TLS1.3，TLS RTT = TLSHandshakeDone→GotFirstResponseByte，
@@ -40,6 +40,10 @@ func Latency(ctx context.Context, d model.Dialer, pingURL string, count int) *mo
 		tlsRTT, httpsPing, code, err := pingOnce(ctx, d, pingURL)
 		if err != nil {
 			failed++
+			if count >= 3 && len(res.HTTPSPing) == 0 && failed >= 2 {
+				res.PacketLoss = 1.0
+				return res
+			}
 			continue
 		}
 		res.TLSRTT = append(res.TLSRTT, tlsRTT)

@@ -21,6 +21,7 @@ import (
 
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/trie"
+	"github.com/miekg/dns"
 
 	"nekospeed/internal/model"
 )
@@ -174,15 +175,17 @@ func probeHost(ctx context.Context, host string, ports map[uint16]struct{}) []ne
 	for round := 0; round < 2; round++ {
 		if round > 0 {
 			// 等递归缓存（TTL 通常 5s）过期后再采样一轮
+			timer := time.NewTimer(6 * time.Second)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil
-			case <-time.After(6 * time.Second):
+			case <-timer.C:
 			}
 		}
 		ips := sampleIPs(ctx, host)
 		if len(ips) == 0 {
-			continue
+			return nil
 		}
 		if good := probeIPs(ctx, ips, portList); len(good) > 0 {
 			return good
@@ -191,15 +194,36 @@ func probeHost(ctx context.Context, host string, ports map[uint16]struct{}) []ne
 	return nil
 }
 
-// sampleIPs 通过多个公共 DNS 与系统解析并行采集 host 的 A 记录（去重）。
+var (
+	queryDNSFn = queryDNSDirect
+	lookupIPFn = func(ctx context.Context, network, host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, network, host)
+	}
+)
+
+// sampleIPs 通过多个公共 DNS 与系统解析并行采集 host 的 IP（优先 A 记录；A 为空时补充 AAAA 记录，自动过滤 Fake-IP 并去重）。
 func sampleIPs(ctx context.Context, host string) []netip.Addr {
+	if ips := sampleRecordSet(ctx, host, "ip4", dns.TypeA, func(a netip.Addr) bool {
+		return a.Is4() && !IsFakeIPAddr(a)
+	}); len(ips) > 0 {
+		return ips
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return sampleRecordSet(ctx, host, "ip6", dns.TypeAAAA, func(a netip.Addr) bool {
+		return a.Is6() && !IsFakeIPAddr(a)
+	})
+}
+
+func sampleRecordSet(ctx context.Context, host, network string, qtype uint16, accept func(netip.Addr) bool) []netip.Addr {
 	var mu sync.Mutex
 	seen := map[netip.Addr]struct{}{}
 	var wg sync.WaitGroup
 
 	add := func(a netip.Addr) {
 		a = a.Unmap()
-		if !a.Is4() || IsFakeIPAddr(a) {
+		if !accept(a) {
 			return
 		}
 		mu.Lock()
@@ -211,7 +235,7 @@ func sampleIPs(ctx context.Context, host string) []netip.Addr {
 		wg.Add(1)
 		go func(server string) {
 			defer wg.Done()
-			for _, ip := range queryA(ctx, server, host) {
+			for _, ip := range queryDNSFn(ctx, server, host, qtype) {
 				add(ip)
 			}
 		}(srv)
@@ -221,7 +245,7 @@ func sampleIPs(ctx context.Context, host string) []netip.Addr {
 		defer wg.Done()
 		lctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if ips, err := net.DefaultResolver.LookupIP(lctx, "ip4", host); err == nil {
+		if ips, err := lookupIPFn(lctx, network, host); err == nil {
 			for _, ip := range ips {
 				if a, ok := netip.AddrFromSlice(ip); ok {
 					add(a)
@@ -236,11 +260,6 @@ func sampleIPs(ctx context.Context, host string) []netip.Addr {
 		out = append(out, a)
 	}
 	return out
-}
-
-// queryA 向指定 DNS 服务器查询 host 的 A 记录（含 CNAME 链末端记录，自动绕过 Fake-IP）。
-func queryA(ctx context.Context, server, host string) []netip.Addr {
-	return QueryADirect(ctx, server, host)
 }
 
 // probeIPs 并发 TCP 探测 ips；只要任一节点端口连通即视为该 IP 存活，按通过端口数从高到低排序（同分保持输入顺序）。

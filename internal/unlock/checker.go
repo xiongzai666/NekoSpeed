@@ -17,7 +17,7 @@ import (
 const requestTimeout = 15 * time.Second
 
 // desktopUA 伪装桌面版 Chrome。
-const desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+const desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 // maxBodyBytes 限制响应体读取大小，避免大页面占内存（只需前部特征）。
 const maxBodyBytes = 1 << 20
@@ -92,7 +92,64 @@ type transportDialer struct {
 	tr *http.Transport
 }
 
+type probeCacheKey struct{}
+
+type probeCacheEntry struct {
+	done chan struct{}
+	res  *httpResult
+	err  error
+}
+
+// probeCache 在单次节点检测（runAll）内共享轻量 HTTP 探测结果，避免重复请求同一上游端点。
+type probeCache struct {
+	mu      sync.Mutex
+	entries map[string]*probeCacheEntry
+}
+
+func withProbeCache(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, probeCacheKey{}, &probeCache{
+		entries: make(map[string]*probeCacheEntry),
+	})
+}
+
+func cachedHTTP(ctx context.Context, key string, fn func() (*httpResult, error)) (*httpResult, error) {
+	cache, _ := ctx.Value(probeCacheKey{}).(*probeCache)
+	if cache == nil {
+		return fn()
+	}
+
+	cache.mu.Lock()
+	if entry, ok := cache.entries[key]; ok {
+		cache.mu.Unlock()
+		select {
+		case <-entry.done:
+			return entry.res, entry.err
+		case <-ctx.Done():
+			return nil, &httpError{err: ctx.Err()}
+		}
+	}
+	entry := &probeCacheEntry{done: make(chan struct{})}
+	cache.entries[key] = entry
+	cache.mu.Unlock()
+
+	completed := false
+	defer func() {
+		if !completed {
+			entry.err = &httpError{err: context.Canceled}
+		}
+		close(entry.done)
+	}()
+
+	entry.res, entry.err = fn()
+	completed = true
+	return entry.res, entry.err
+}
+
 func runAll(ctx context.Context, d model.Dialer, checkers []Checker) []model.UnlockResult {
+	ctx = withProbeCache(ctx)
 	if c := model.HTTPClient(d, requestTimeout); c != nil {
 		if tr, ok := c.Transport.(*http.Transport); ok {
 			defer tr.CloseIdleConnections()

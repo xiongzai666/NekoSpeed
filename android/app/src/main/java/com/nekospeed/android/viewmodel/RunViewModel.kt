@@ -18,7 +18,7 @@ import java.io.File
 
 private const val DEFAULT_THREADS = 8
 private const val DEFAULT_DURATION = 10
-private const val DEFAULT_CONCURRENCY = 1
+private const val DEFAULT_CONCURRENCY = 4
 private const val DEFAULT_PING_COUNT = 4
 
 enum class SubInputMode {

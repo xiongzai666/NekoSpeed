@@ -11,11 +11,12 @@
 [![mihomo](https://img.shields.io/badge/mihomo-v1.19.34-2ea44f.svg)](https://github.com/MetaCubeX/mihomo)
 [![CI & Release](https://github.com/xiongzai666/NekoSpeed/actions/workflows/ci-release.yml/badge.svg)](https://github.com/xiongzai666/NekoSpeed/actions/workflows/ci-release.yml)
 [![Sync Upstream & Mihomo](https://github.com/xiongzai666/NekoSpeed/actions/workflows/sync-mihomo.yml/badge.svg)](https://github.com/xiongzai666/NekoSpeed/actions/workflows/sync-mihomo.yml)
+[![Update GeoIP](https://github.com/xiongzai666/NekoSpeed/actions/workflows/update-geoip.yml/badge.svg)](https://github.com/xiongzai666/NekoSpeed/actions/workflows/update-geoip.yml)
 [![Android](https://img.shields.io/badge/Android-8.0+-3DDC84.svg)](android/)
 
 </div>
 
-> 本仓库基于 [KaWaIDeSuNe/NekoSpeed](https://github.com/KaWaIDeSuNe/NekoSpeed) 持续维护，重点扩展了模块化内嵌 Web UI、接口访问令牌鉴权（`-web-token`）、物理网卡自动绑定（防本地 TUN 干扰）、高精度多源 GeoIP 识别与冷却机制、深色高对比度主题渲染，以及每日自动同步上游与 `mihomo` 内核的 GitHub Actions 发布流水线。
+> 本仓库基于 [KaWaIDeSuNe/NekoSpeed](https://github.com/KaWaIDeSuNe/NekoSpeed) 持续维护，重点扩展了重新设计的内嵌 Web UI（含可拖拽拓扑分栏、SSE 节流看板与一键更新 IP 库）、接口访问令牌鉴权（`-web-token`）、物理网卡自动绑定（防本地 TUN 干扰）、高精度离线多 MMDB + 在线容灾 GeoIP 引擎、精准流媒体 / AI 解锁与 RFC 5780 STUN NAT 探测、深色高对比度主题渲染，以及每日自动同步上游、`mihomo` 内核与 GeoIP 数据库的 GitHub Actions 流水线。
 >
 > **开源协议**：因核心依赖 `mihomo`（GPL-3.0）静态编译进产物，本项目整体遵循 **GPL-3.0** 协议开源（见 [LICENSE](LICENSE)）。
 
@@ -39,11 +40,11 @@
 ## 核心特性
 
 - **吞吐与延迟测速**：支持多线程 / 单线程下载测速（每秒速度序列、平均速度、峰值速度、单节点流量上限 `-max-mb`）、TLS RTT 与 HTTPS 延迟测量（基于 `httptrace` 精确计时）。
-- **并发探测与下载串行保护**：延迟、流媒体/AI 解锁、拓扑与 NAT 支持多节点并发探测（默认 `-concurrency 6`）；大流量下载测速通过独立信号量自动串行执行，兼顾整体耗时与带宽测试准确度。
+- **并发探测与下载串行保护**：延迟、流媒体/AI 解锁、拓扑与 NAT 支持多节点并发探测（默认 `-concurrency 6`）；探测阶段完成后立即释放并发槽位，大流量下载测速通过独立信号量自动串行执行，兼顾整体耗时与带宽测试准确度。
 - **流媒体解锁检测（10 项）**：YouTube、Netflix、Disney+、B 站港澳台、DAZN、Abema、巴哈姆特、Steam、Spotify、TikTok。
 - **AI 服务可用性检测（8 项）**：OpenAI (ChatGPT)、Copilot、Gemini、Llama (MetaAI)、Claude、Perplexity、Sora、Grok。
 - **入口 / 出口拓扑分析**：直连探测节点入口 IP 与代理实测落地真实 IP（Cloudflare Trace + 多源 GeoIP / 本地 MMDB），按接入簇聚合并输出入口 / 出口拓扑表。
-- **UDP NAT 类型探测**：基于 STUN（RFC 5780）识别 `FullCone`、`Restricted`、`PortRestricted`、`Symmetric`。
+- **UDP NAT 类型探测**：基于 STUN（RFC 5780）优先通过支持 `OTHER-ADDRESS` 的标准服务器并直连解析绕过 TUN Fake-IP，识别 `FullCone`、`RestrictedCone`、`PortRestrictedCone`、`Symmetric`（无法确认时保守回退 `Unknown`）。
 - **智能过滤与命名**：自动跳过“剩余流量 / 套餐到期 / 官网 / 重置”等提示类伪节点（`-skip-info`），支持正则白名单（`-filter`）与黑名单（`-exclude`），并自动提取订阅名称作为文件名前缀。
 - **21 款渲染主题**：包含 `default`、16 款无底纹浅色色相主题与 4 款深色高对比度主题，文字颜色随底色亮度自动反白或深灰适配。
 
@@ -88,15 +89,15 @@ go build -o nekospeed ./cmd/nekospeed
 ./nekospeed -web 0.0.0.0:18189 -web-token "your-secret-token"
 ```
 
-> **安全说明**：监听非回环地址（如 `0.0.0.0`）且未设置 `-web-token` / `NEKOSPEED_WEB_TOKEN` 时，控制台会输出安全警告。开启令牌后，所有 `/api/*` 与 `/files/*` 请求均需携带 `Authorization: Bearer <token>`、`X-NekoSpeed-Token`、`?token=` 或登录 Cookie；浏览器首次访问遇 `401` 时会自动弹出令牌输入框并保存在本地会话中。
+> **安全说明**：监听非回环地址（如 `0.0.0.0`）且未设置 `-web-token` / `NEKOSPEED_WEB_TOKEN` 时，控制台会输出安全警告。所有写操作接口均启用同源/CSRF 校验（`Sec-Fetch-Site` / `Origin` / `Content-Type`）；开启令牌后，所有 `/api/*` 与 `/files/*` 请求均需携带 `Authorization: Bearer <token>`、`X-NekoSpeed-Token`、`?token=` 或登录 Cookie；浏览器首次访问遇 `401` 时会自动弹出令牌输入框并保存在本地会话中。
 
 ### 操作工作流
 
-1. **三模式订阅输入**：通过顶部「订阅链接 / 本地文件 / 粘贴内容」分段切换器导入订阅，支持直接拖拽 `.yaml` / `.txt` 文件或粘贴多行节点；切换订阅来源或替换 URL 时，未手动锁定的订阅名称会自动重置并重新识别。
-2. **测前挑节点**：点击「挑节点」即可在不触发测速的情况下预览全部节点，支持关键词搜索、一键排除倍率节点以及按需勾选目标节点。
-3. **节流流式看板**：测试期间通过 SSE（`event: node`）实时推送单节点结果，前端按动画帧合批刷新表格并维护最近 1500 行终端日志，动态展示可用节点数、最高峰值速度、累计流量与预计剩余时间（ETA）。
-4. **免重测即时重绘**：测完后无需重新发起网络请求，可直接更换配色主题、排序规则、自定义水印或带宽标题前缀（例如 `1Gbps` 或 `上海电信@1Gbps`）重新渲染并覆盖/保存全套 PNG。
-5. **导出与历史回看**：支持一键复制高清 PNG 到剪贴板（含非 HTTPS 环境兼容回退）、导出 UTF-8 BOM CSV、下载 JSON，以及在顶部历史记录条随时切换查看或删除过往报告（保存在 `out/web/<时间戳>/`）。
+1. **紧凑工作台与三模式导入**：采用左右可分栏精简工作台与顶栏状态集成设计（含「更新 IP 库」并发更新浮层与运行环境指示）。支持「订阅链接 / 本地文件 / 粘贴文本」切换与 `.yaml` / `.txt` 拖拽上传；粘贴多行节点、`proxies:` 或分享链接时自动切换至「粘贴文本」，替换来源时自动重置未锁定订阅名。
+2. **测前挑节点与场景预设**：提供一键场景预设（综合评测 / 仅测速 / 仅解锁省流 / 全项 + NAT）及自定义测试项，点击「挑节点」即可在不触发测速的情况下预览全部节点，支持关键词搜索、一键排除倍率节点与按需勾选目标节点。
+3. **流式看板与可拖拽拓扑分栏**：测试期间通过 SSE（`event: node`）实时推送单节点结果，前端按动画帧合批刷新表格（含延迟分档配色、解锁状态标识与节点筛选）并展示阶段进度、可用节点数、峰值速度与 ETA；入口 / 出口拓扑双栏之间支持鼠标拖拽调节宽度（`22%`–`78%`，自动记忆比例并支持双击 / 键盘复位）及点击 IP 一键复制。
+4. **免重测即时重绘与画廊视图**：测完后无需重新发起网络请求，可直接更换配色主题、排序规则、自定义水印或带宽标题前缀（例如 `1Gbps` 或 `上海电信@1Gbps`）重新渲染全套 PNG（渲染页脚自动标注系统本地时区，支持中文地区与城市中文映射），并在全宽画廊与支持滚轮缩放的灯箱中浏览对比。
+5. **导出与历史管理**：支持一键复制高清 PNG 到剪贴板（含非 HTTPS 环境兼容回退）、导出 UTF-8 BOM CSV（含入口 / 出口城市与 ASN / 组织字段）、下载 JSON，以及在历史记录抽屉中切换查看、单条删除或批量清理过往报告（便携模式下默认保存在可执行文件同级 `out/web/<时间戳>/`）。
 
 ---
 
@@ -149,7 +150,7 @@ go build -o nekospeed ./cmd/nekospeed
 ### 支持的订阅格式
 
 - **Clash / Mihomo YAML**：标准 `proxies:` 节点列表，支持 `mihomo` 全系协议，并自动展开顶层 `hosts:` 域名/IP 映射（兼容精确匹配、`*.`、`+.`/`.` 通配符及链式跳转，同时为未显式设置 SNI 的 TLS 节点保留原域名作默认 SNI）。
-- **分享链接订阅（Base64 编码或纯文本逐行）**：`ss://`、`ssr://`、`vmess://`、`vless://`、`trojan://`、`hysteria://` / `hy://`、`hysteria2://` / `hy2://`、`tuic://`、`anytls://`、`snell://`。
+- **分享链接订阅（Base64 编码或纯文本逐行）**：`ss://`、`ssr://`、`vmess://`、`vless://`、`trojan://`、`hysteria://` / `hy://`、`hysteria2://` / `hy2://`（支持 `mport` 多端口、`pinSHA256`、`allowInsecure`）、`tuic://`、`anytls://`、`snell://`，兼容 `h2` / `httpupgrade` 等传输参数。
 
 ---
 
@@ -178,11 +179,12 @@ go build -o nekospeed ./cmd/nekospeed
 针对国内网络环境与本地代理干扰，程序在运行时默认启用以下防护（排查思路与真实案例详见 [问题排查与防护机制](docs/troubleshooting.md)）：
 
 1. **物理网卡自动绑定（防 TUN 套代理）**：自动扫描系统默认路由对应的物理网卡（过滤 `Mihomo`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟接口），通过 `dialer.DefaultInterface` 直绑物理网卡发送测速与预检流量；当本机开启 TUN 且未显式指定 `-proxy`/环境变量代理、拉取订阅遇到 `403` 时，也会自动切换至物理网卡直连重试。
-2. **多公共 DNS + TCP 预检**：每次测试前先清空全局 `DefaultHosts` 防止 Web UI 跨任务残留，随后并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 `198.18.0.0/15` Fake-IP 并对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
+2. **多公共 DNS + TCP 预检**：每次测试前先清空全局 `DefaultHosts` 防止 Web UI 跨任务残留，随后并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 IPv4（`198.18.0.0/15`）与 IPv6（`fc00::/7`、`2001:2::/48`）Fake-IP，无 A 记录时自动补全 AAAA 探测并跳过无效等待，再对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
 3. **多源与离线分层 GeoIP 引擎**：
-   - **离线多库自动加速**：程序自动探测 `geoip/` 目录（可用 `NEKOSPEED_GEOIP_DIR` 覆盖）下的 `GeoCN.mmdb`（国内双栈省市区县+运营商）、`ipinfo_lite.mmdb`（日更全球国家+ASN，若缺失则自动回退 `GeoLite2-ASN.mmdb`）与 `GeoLite2-City.mmdb`（全球城市中文名）。可在 Web UI 顶栏或高级参数中点击**「更新 IP 库」**一键下载校验，优先拉取本仓 `geoip-latest` Release 并自动回退至上游公开镜像；如本机配置了 `NEKOSPEED_IPINFO_TOKEN`，亦可直连 IPinfo 官方下载 `ipinfo_lite.mmdb`。
-   - **在线容灾与物理落地校准**：本地未安装离线库时，优先走国际源（`ip-api.com` → `api.ip.sb` → `ipwho.is` → `get.geojs.io`），仅对判定为中国大陆（`CN`）或本机公网 IP 再触发国内高精接口（纯真 CZ88 → Mir6 → 百度大数据 → 太平洋电脑网），避免海外 IP 浪费国内额度与多余 RTT，并保留 24 小时进程级缓存与 3 分钟故障冷却；代理出口优先通过 Cloudflare Trace 实测真实落地 IP 与机房三字码。
-4. **100% 丢包快速熔断**：延迟探测全部失败时记录真实底层错误并跳过后续测速、解锁与拓扑探测，避免无效等待和“全 0 假成功”。
+   - **离线多库自动加速**：程序按 `NEKOSPEED_GEOIP_DIR` → 当前工作目录 `geoip/` → 可执行文件同级 `geoip/` 顺序自动探测离线库，加载 `GeoCN.mmdb`（国内双栈省市区县 + 运营商）、`ipinfo_lite.mmdb`（日更全球国家 + ASN，若缺失则自动回退 `GeoLite2-ASN.mmdb`）与 `GeoLite2-City.mmdb`（全球城市中文名）。可在 Web UI 顶栏环境与 GeoIP 状态浮层中点击**「更新 IP 库」**一键并发下载校验，优先拉取本仓 `geoip-latest` Release 并自动回退至上游公开镜像；如本机配置了 `NEKOSPEED_IPINFO_TOKEN`，亦可直连 IPinfo 官方下载 `ipinfo_lite.mmdb`。
+   - **在线容灾与物理落地校准**：本地未安装离线库时，优先走国际源（`ip-api.com` → `api.ip.sb` → `ipwho.is` → `get.geojs.io`），仅对判定为中国大陆（`CN`）或本机公网 IP 再触发国内高精接口（纯真 CZ88 → Mir6 → 百度大数据 → 太平洋电脑网），避免海外 IP 浪费国内额度与多余 RTT，并保留 24 小时进程级缓存与 3 分钟故障冷却；代理出口优先通过 Cloudflare Trace 实测真实落地 IP 与国家代码，再由本地 MMDB 或国际在线源补全城市、省区与 ASN / 组织信息（`colo` 机房三字码不再写入城市或省区，避免误标为真实出口城市）。
+4. **快速熔断与连接生命周期管理**：单次延迟探测限超时 `6s`，连续 2 次失败或 100% 丢包时立即记录真实底层错误并跳过后续测速、解锁与拓扑探测；下载测速严格受独立信号量保护且在结束时释放底层 `proxyDialer.Close()`，避免并发连接堆积或“全 0 假成功”。
+5. **高精度解锁与 NAT 协议校验**：Disney+ 对接 Bamgrid `/devices`（兼容 `201` / `200`）→ `/token`（裸 Token + `forbidden-location` 识别）→ GraphQL `refreshToken`（解析 `extensions.sdk.session` 支持状态与国家码）；Claude 对接官方 `api.anthropic.com/v1/messages`；TikTok 优先 `/explore` 提取地区并兼容首页兜底；同节点 OpenAI / Sora 探测自动去重，Netflix 解锁非自制剧即短路，全系请求使用 Chrome 131 UA。
 
 ---
 
@@ -190,8 +192,8 @@ go build -o nekospeed ./cmd/nekospeed
 
 `android/` 目录提供基于 Jetpack Compose + Material 3 的原生 Android 客户端，内部嵌入交叉编译后的 Go 二进制与中文字体，实现离线包内一键调用与结果渲染：
 
-- **主要特性**：支持订阅 URL / 粘贴内容双输入、5 项测试全覆盖、`Node / Unlock / Topology / Images` 四 Tab 报告、PNG 保存至系统相册与分享、历史归档管理、前台服务（`NekoSpeedService`）保活与通知栏取消、VPN 冲突检测。
-- **兼容性**：覆盖 `arm64` / `amd64` 双架构（Go 二进制经 gzip 压缩至约 10 MB），内置 `NotoSansCJKsc-Regular.otf` 兜底厂商 ROM 字体兼容问题，并在 Android 14+ SELinux 限制下自动通过 `/system/bin/linker64` 拉起二进制。
+- **主要特性**：支持订阅 URL / 粘贴内容双输入、5 项测试全覆盖（默认并发节点数 `concurrency = 4`，`threads = 8`，`duration = 10`）、`Node / Unlock / Topology / Images` 四 Tab 报告、PNG 保存至系统相册与分享、历史归档管理、前台服务（`NekoSpeedService`）保活与通知栏取消、VPN 冲突检测。
+- **兼容性**：覆盖 `arm64` / `amd64` 双架构（Go 二进制经 gzip 压缩至约 10 MB），内置 `NotoSansCJKsc-Regular.otf` 兜底厂商 ROM 字体兼容问题；自动创建应用私有 `files/geoip` 并通过 `NEKOSPEED_GEOIP_DIR` 注入子进程环境（兼容直接执行与 Android 14+ SELinux `/system/bin/linker64` 回退）。
 - **常用构建命令**：
 
 ```bash
@@ -207,14 +209,14 @@ cd android
 
 ## GitHub Actions 自动化流水线
 
-工作流配置位于 `.github/workflows/`：
+工作流配置位于 `.github/workflows/`（已升级至 Node 24 原生 Action 主版本：`actions/checkout@v7`、`actions/setup-go@v7`、`softprops/action-gh-release@v3`）：
 
 1. **[Sync Upstream & Mihomo Auto Release](.github/workflows/sync-mihomo.yml)**：
    - 每日 UTC `02:00`（北京时间 `10:00`）定时检查，亦支持在 Actions 页面通过 `Run workflow` 手动触发（可选 `force_release` 强制基于当前代码重发版）。
    - 自动拉取上游 `KaWaIDeSuNe/NekoSpeed` 的 `main` 分支：可快进/无冲突则直接合并；若存在文件冲突，则中止合并并将上游提交推至 `sync/upstream-main` 自动创建 PR，防止覆盖本地改进。
    - 查询 `MetaCubeX/mihomo` 最新正式版 Tag 并更新依赖，运行全量单测与 6 平台交叉编译后自动发布至 Releases；若同 UTC 日期已有同名 Tag，自动追加短提交号（如 `v2026.11.13-v1.19.34-<sha>`）避免冲突。
 2. **[CI & Tag Release](.github/workflows/ci-release.yml)**：
-   - 监听 `main` 分支推送、PR、手动触发与 `v*` 标签推送，执行全量单元测试并在打标签或手动发布时构建多平台压缩包与 `SHA256SUMS.txt`。
+   - 监听 `main` / `master` / `feat/**` / `fork/**` 分支推送、PR 与 `v*` 标签推送，执行全量单元测试并在打标签发布时构建多平台压缩包与 `SHA256SUMS.txt`。
 3. **[Update GeoIP Databases](.github/workflows/update-geoip.yml)**：
    - 每日 UTC `03:00`（北京时间 `11:00`）定时拉取 `GeoCN.mmdb`、`GeoLite2-City.mmdb`、`GeoLite2-ASN.mmdb`；若仓库 Secrets 中配置了 `IPINFO_TOKEN`（推荐免费申请，切勿写入代码），同步拉取日更 `ipinfo_lite.mmdb`，校验后发布至固定 Release 标签 `geoip-latest`（`make_latest: false`，不干扰软件版本发布）。
 

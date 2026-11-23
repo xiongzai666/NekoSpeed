@@ -2,11 +2,17 @@ package nodepool
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/netip"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/miekg/dns"
 	"nekospeed/internal/model"
 )
 
@@ -128,5 +134,156 @@ func TestResetHosts(t *testing.T) {
 	ResetHosts()
 	if _, ok := resolver.DefaultHosts.Search("stale-node.example.com", false); ok {
 		t.Fatal("ResetHosts 后不应再命中残留条目")
+	}
+}
+
+type stubCloseProxy struct {
+	C.Proxy
+	closed bool
+	err    error
+}
+
+func (s *stubCloseProxy) Close() error {
+	s.closed = true
+	return s.err
+}
+
+func TestProxyDialerClose(t *testing.T) {
+	wantErr := errors.New("close boom")
+	stub := &stubCloseProxy{err: wantErr}
+	var d model.Dialer = &proxyDialer{proxy: stub}
+	closer, ok := d.(io.Closer)
+	if !ok {
+		t.Fatal("*proxyDialer 应实现 io.Closer")
+	}
+	if err := closer.Close(); !errors.Is(err, wantErr) || !stub.closed {
+		t.Fatalf("Close() = %v (closed=%v), want %v", err, stub.closed, wantErr)
+	}
+
+	// nil proxy 不应 panic
+	if err := (&proxyDialer{}).Close(); err != nil {
+		t.Fatalf("空 proxy Close() = %v, want nil", err)
+	}
+
+	// 真实 mihomo 解析出的拨号器也应支持 Close
+	realDialer, err := NewDialer(model.Node{
+		Name: "ss-close-test",
+		Raw: map[string]any{
+			"name": "ss-close-test", "type": "ss", "server": "127.0.0.1", "port": 8388,
+			"cipher": "aes-256-gcm", "password": "pw",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+	if c, ok := realDialer.(io.Closer); !ok {
+		t.Fatal("NewDialer 返回值应实现 io.Closer")
+	} else if err := c.Close(); err != nil {
+		t.Fatalf("realDialer.Close() = %v", err)
+	}
+}
+
+func TestSampleIPsAAAAFallbackAndFilterFakeIP(t *testing.T) {
+	origDNS, origLookup := queryDNSFn, lookupIPFn
+	t.Cleanup(func() {
+		queryDNSFn = origDNS
+		lookupIPFn = origLookup
+	})
+
+	realV6DNS := netip.MustParseAddr("2606:4700:4700::1111")
+	realV6Sys := netip.MustParseAddr("2001:4860:4860::8888")
+
+	queryDNSFn = func(_ context.Context, srv, _ string, qtype uint16) []netip.Addr {
+		if qtype == dns.TypeA {
+			return nil
+		}
+		if srv == preflightDNServers[0] {
+			return []netip.Addr{
+				netip.MustParseAddr("2001:2::1"), // Fake-IPv6 应过滤
+				netip.MustParseAddr("fc00::1"),   // ULA Fake-IPv6 应过滤
+				realV6DNS,
+			}
+		}
+		return nil
+	}
+	lookupIPFn = func(_ context.Context, network, _ string) ([]net.IP, error) {
+		if network == "ip4" {
+			return []net.IP{net.ParseIP("198.18.0.5")}, nil // Fake-IPv4 应过滤，导致 A 为空
+		}
+		if network == "ip6" {
+			return []net.IP{
+				net.ParseIP("fd12::1"),
+				net.ParseIP("::1"),
+				net.ParseIP(realV6Sys.String()),
+			}, nil
+		}
+		return nil, nil
+	}
+
+	got := sampleIPs(context.Background(), "v6only.example.com")
+	if len(got) != 2 || !slices.Contains(got, realV6DNS) || !slices.Contains(got, realV6Sys) {
+		t.Fatalf("sampleIPs IPv6 回退异常: got=%v, want [%v, %v]", got, realV6DNS, realV6Sys)
+	}
+}
+
+func TestProbeHostSkipsSleepWhenZeroIPs(t *testing.T) {
+	origDNS, origLookup := queryDNSFn, lookupIPFn
+	t.Cleanup(func() {
+		queryDNSFn = origDNS
+		lookupIPFn = origLookup
+	})
+
+	queryDNSFn = func(context.Context, string, string, uint16) []netip.Addr { return nil }
+	lookupIPFn = func(context.Context, string, string) ([]net.IP, error) { return nil, nil }
+
+	start := time.Now()
+	got := probeHost(context.Background(), "nxdomain.example.invalid", map[uint16]struct{}{443: {}})
+	elapsed := time.Since(start)
+	if len(got) != 0 {
+		t.Fatalf("expected nil, got %v", got)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("零 IP 时不应睡眠 6s，实际耗时 %s", elapsed)
+	}
+}
+
+func TestPreflightServersIPv6OnlyTCPNodePinned(t *testing.T) {
+	origDNS, origLookup, origProbe := queryDNSFn, lookupIPFn, tcpProbeFn
+	t.Cleanup(func() {
+		queryDNSFn = origDNS
+		lookupIPFn = origLookup
+		tcpProbeFn = origProbe
+		ResetHosts()
+	})
+	ResetHosts()
+
+	v6 := netip.MustParseAddr("2606:4700::6810:85e5")
+	queryDNSFn = func(_ context.Context, srv, _ string, qtype uint16) []netip.Addr {
+		if qtype == dns.TypeAAAA && srv == preflightDNServers[0] {
+			return []netip.Addr{v6}
+		}
+		return nil
+	}
+	lookupIPFn = func(context.Context, string, string) ([]net.IP, error) { return nil, nil }
+	tcpProbeFn = func(_ context.Context, ip netip.Addr, port uint16) bool {
+		return ip == v6 && port == 443
+	}
+
+	nodes := []model.Node{{
+		Name:   "v6-vless",
+		Type:   "Vless",
+		Server: "v6node.example.com",
+		Raw:    map[string]any{"type": "vless", "server": "v6node.example.com", "port": 443},
+	}}
+	res := PreflightServers(context.Background(), nodes)
+	if res.PinnedHosts != 1 || len(res.FailedHosts) != 0 {
+		t.Fatalf("IPv6-only 节点预检应钉住，实际 %+v", res)
+	}
+	hv, ok := resolver.DefaultHosts.Search("v6node.example.com", false)
+	if !ok {
+		t.Fatal("DefaultHosts 中应存在 v6node.example.com")
+	}
+	if !slices.Contains(hv.IPs, v6) {
+		t.Fatalf("DefaultHosts 钉住的 IPv6 异常: ips=%v", hv.IPs)
 	}
 }

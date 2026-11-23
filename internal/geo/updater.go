@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oschwald/maxminddb-golang"
@@ -142,7 +144,7 @@ func GetDBStatus(dir string) DBStatus {
 }
 
 // UpdateDBs 下载并校验最新离线 MMDB（优先仓内 geoip-latest Release，失败自动回退上游镜像），
-// 原子替换本地目录中的数据库文件并刷新进程级 GeoIP 缓存。
+// 并行拉取 3 个库，原子替换本地目录中的数据库文件并刷新进程级 GeoIP 缓存。
 func UpdateDBs(ctx context.Context, opts UpdateOptions) (UpdateResult, error) {
 	dir := strings.TrimSpace(opts.Dir)
 	if dir == "" {
@@ -171,50 +173,84 @@ func UpdateDBs(ctx context.Context, opts UpdateOptions) (UpdateResult, error) {
 		token = strings.TrimSpace(os.Getenv("NEKOSPEED_IPINFO_TOKEN"))
 	}
 
-	// 1. GeoCN.mmdb（国内双栈区县+运营商）
-	report("正在更新国内库 (GeoCN.mmdb)…", 0, totalSteps)
-	if err := downloadFirstAvailable(ctx, client, []string{
-		strings.TrimRight(GeoIPReleaseBaseURL, "/") + "/" + geoCNFileName,
-		GeoCNUpstreamURL,
-	}, filepath.Join(dir, geoCNFileName)); err != nil {
-		res.Failed = append(res.Failed, fmt.Sprintf("%s: %v", geoCNFileName, err))
-	} else {
-		res.Updated = append(res.Updated, geoCNFileName)
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		done int
+	)
+
+	report("正在并行更新离线 IP 库…", 0, totalSteps)
+
+	recordResult := func(updatedFile, failName string, failErr error, stage string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if failErr == nil {
+			res.Updated = append(res.Updated, updatedFile)
+		} else {
+			res.Failed = append(res.Failed, fmt.Sprintf("%s: %v", failName, failErr))
+		}
+		done++
+		report(stage, done, totalSteps)
 	}
+
+	relBase := strings.TrimRight(GeoIPReleaseBaseURL, "/")
+
+	// 1. GeoCN.mmdb（国内双栈区县+运营商）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := downloadFirstAvailable(ctx, client, []string{
+			relBase + "/" + geoCNFileName,
+			GeoCNUpstreamURL,
+		}, filepath.Join(dir, geoCNFileName))
+		if err != nil {
+			recordResult("", geoCNFileName, err, "国内库 (GeoCN.mmdb) 更新失败")
+			return
+		}
+		recordResult(geoCNFileName, "", nil, "国内库更新完成 (GeoCN.mmdb)")
+	}()
 
 	// 2. 全球 ASN 库（优先 IPinfo Lite，未配置或未发布时自动回退 GeoLite2-ASN）
-	report("正在更新全球 ASN 库 (IPinfo Lite / GeoLite2-ASN)…", 1, totalSteps)
-	ipinfoOK := false
-	var ipinfoCandidates []string
-	if token != "" {
-		ipinfoCandidates = append(ipinfoCandidates, IPinfoLiteDownloadBaseURL+"?token="+url.QueryEscape(token))
-	}
-	ipinfoCandidates = append(ipinfoCandidates, strings.TrimRight(GeoIPReleaseBaseURL, "/")+"/"+ipinfoLiteFileName)
-	if err := downloadFirstAvailable(ctx, client, ipinfoCandidates, filepath.Join(dir, ipinfoLiteFileName)); err == nil {
-		res.Updated = append(res.Updated, ipinfoLiteFileName)
-		ipinfoOK = true
-	}
-	if !ipinfoOK {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var ipinfoCandidates []string
+		if token != "" {
+			ipinfoCandidates = append(ipinfoCandidates, IPinfoLiteDownloadBaseURL+"?token="+url.QueryEscape(token))
+		}
+		ipinfoCandidates = append(ipinfoCandidates, relBase+"/"+ipinfoLiteFileName)
+		if err := downloadFirstAvailable(ctx, client, ipinfoCandidates, filepath.Join(dir, ipinfoLiteFileName)); err == nil {
+			recordResult(ipinfoLiteFileName, "", nil, "全球 ASN 库更新完成 (IPinfo Lite)")
+			return
+		}
 		if err := downloadFirstAvailable(ctx, client, []string{
-			strings.TrimRight(GeoIPReleaseBaseURL, "/") + "/" + geoLiteASNFileName,
+			relBase + "/" + geoLiteASNFileName,
 			GeoLiteASNUpstreamURL,
 		}, filepath.Join(dir, geoLiteASNFileName)); err != nil {
-			res.Failed = append(res.Failed, fmt.Sprintf("%s: %v", geoLiteASNFileName, err))
-		} else {
-			res.Updated = append(res.Updated, geoLiteASNFileName)
+			recordResult("", geoLiteASNFileName, err, "全球 ASN 库更新失败")
+			return
 		}
-	}
+		recordResult(geoLiteASNFileName, "", nil, "全球 ASN 库更新完成 (GeoLite2-ASN)")
+	}()
 
 	// 3. GeoLite2-City.mmdb（全球城市中文名）
-	report("正在更新全球城市库 (GeoLite2-City.mmdb)…", 2, totalSteps)
-	if err := downloadFirstAvailable(ctx, client, []string{
-		strings.TrimRight(GeoIPReleaseBaseURL, "/") + "/" + geoLiteCityName,
-		GeoLiteCityUpstreamURL,
-	}, filepath.Join(dir, geoLiteCityName)); err != nil {
-		res.Failed = append(res.Failed, fmt.Sprintf("%s: %v", geoLiteCityName, err))
-	} else {
-		res.Updated = append(res.Updated, geoLiteCityName)
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := downloadFirstAvailable(ctx, client, []string{
+			relBase + "/" + geoLiteCityName,
+			GeoLiteCityUpstreamURL,
+		}, filepath.Join(dir, geoLiteCityName))
+		if err != nil {
+			recordResult("", geoLiteCityName, err, "全球城市库 (GeoLite2-City.mmdb) 更新失败")
+			return
+		}
+		recordResult(geoLiteCityName, "", nil, "全球城市库更新完成 (GeoLite2-City.mmdb)")
+	}()
+
+	wg.Wait()
+	sort.Strings(res.Updated)
+	sort.Strings(res.Failed)
 
 	if len(res.Updated) > 0 {
 		ClearGlobalCache()

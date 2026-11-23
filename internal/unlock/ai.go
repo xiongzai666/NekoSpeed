@@ -10,21 +10,50 @@ import (
 	"nekospeed/internal/model"
 )
 
+const (
+	defaultClaudeURL    = "https://claude.ai/"
+	defaultClaudeAPIURL = "https://api.anthropic.com/v1/messages"
+)
+
 // 各 AI 平台检测端点（包内变量，测试时可替换）。
 var (
-	openAITraceURL      = "https://chat.openai.com/cdn-cgi/trace"
+	openAITraceURL      = "https://chatgpt.com/cdn-cgi/trace"
 	openAIComplianceURL = "https://api.openai.com/compliance/cookie_requirements"
 	openAIIOSURL        = "https://ios.chat.openai.com/"
-	copilotURL         = "https://copilot.microsoft.com/"
-	geminiURL          = "https://gemini.google.com/app"
-	llamaAPIURL        = "https://api.llama.com/v1/models"
-	claudeURL          = "https://claude.ai/"
-	claudeTraceURL     = "https://claude.ai/cdn-cgi/trace"
-	perplexityAPIURL   = "https://api.perplexity.ai/chat/completions"
-	perplexityTraceURL = "https://www.perplexity.ai/cdn-cgi/trace"
-	soraAPIURL         = "https://api.openai.com/v1/videos"
-	grokURL            = "https://grok.x.ai/"
+	copilotURL          = "https://copilot.microsoft.com/"
+	geminiURL           = "https://gemini.google.com/app"
+	llamaAPIURL         = "https://api.llama.com/v1/models"
+	claudeURL           = defaultClaudeURL
+	claudeAPIURL        = defaultClaudeAPIURL
+	claudeTraceURL      = "https://claude.ai/cdn-cgi/trace"
+	perplexityAPIURL    = "https://api.perplexity.ai/chat/completions"
+	perplexityTraceURL  = "https://www.perplexity.ai/cdn-cgi/trace"
+	soraAPIURL          = "https://api.openai.com/v1/videos"
+	grokURL             = "https://grok.x.ai/"
 )
+
+var claudeUnsupportedRegions = map[string]bool{
+	"CN": true, "HK": true, "MO": true, "RU": true,
+	"BY": true, "KP": true, "IR": true, "SY": true,
+	"CU": true, "AF": true, "VE": true,
+}
+
+func fetchOpenAITrace(ctx context.Context, c *http.Client) (*httpResult, error) {
+	return cachedHTTP(ctx, "openai_trace:"+openAITraceURL, func() (*httpResult, error) {
+		return doGet(ctx, c, openAITraceURL)
+	})
+}
+
+func fetchOpenAICompliance(ctx context.Context, c *http.Client) (*httpResult, error) {
+	return cachedHTTP(ctx, "openai_compliance:"+openAIComplianceURL, func() (*httpResult, error) {
+		return doRequest(ctx, c, http.MethodGet, openAIComplianceURL, nil, map[string]string{
+			"Authorization": "Bearer null",
+			"Content-Type":  "application/json",
+			"Origin":        "https://platform.openai.com",
+			"Referer":       "https://platform.openai.com/",
+		})
+	})
+}
 
 var traceLocRe = regexp.MustCompile(`(?m)^loc=([A-Z]{2})$`)
 
@@ -43,18 +72,13 @@ func traceRegion(body []byte) string {
 // 与地区无关，不能把 403 状态码作为依据。
 func checkOpenAI(ctx context.Context, d model.Dialer) model.UnlockResult {
 	c := newClient(d, true)
-	trace, err := doGet(ctx, c, openAITraceURL)
+	trace, err := fetchOpenAITrace(ctx, c)
 	if err != nil {
 		return reqFailed("openai")
 	}
 	region := traceRegion(trace.Body)
 
-	comp, err := doRequest(ctx, c, http.MethodGet, openAIComplianceURL, nil, map[string]string{
-		"Authorization": "Bearer null",
-		"Content-Type":  "application/json",
-		"Origin":        "https://platform.openai.com",
-		"Referer":       "https://platform.openai.com/",
-	})
+	comp, err := fetchOpenAICompliance(ctx, c)
 	if err != nil {
 		return reqFailed("openai")
 	}
@@ -132,10 +156,46 @@ func checkLlama(ctx context.Context, d model.Dialer) model.UnlockResult {
 	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d (%db)", r.StatusCode, len(r.Body))}
 }
 
-// checkClaude 首页被 Cloudflare 按地区拦截时 body 含 "not available"；
-// 仅凭 403 不能判断，需看 body 特征。地区取自 cdn-cgi/trace。
+// checkClaude 默认先查询 claude.ai/cdn-cgi/trace 获取地区，再向官方 API POST 空 JSON，
+// 正常节点未鉴权返回 401/400/200 即可绕过网页端 Cloudflare JS 403 挑战；
+// 若测试仅替换了 claudeURL 而未替换 claudeAPIURL，则保持旧版首页检测路径以兼容既有单测。
 func checkClaude(ctx context.Context, d model.Dialer) model.UnlockResult {
 	c := newClient(d, true)
+	if claudeURL != defaultClaudeURL && claudeAPIURL == defaultClaudeAPIURL {
+		return checkClaudeLegacy(ctx, c)
+	}
+
+	region := ""
+	if trace, terr := doGet(ctx, c, claudeTraceURL); terr == nil {
+		region = traceRegion(trace.Body)
+	}
+
+	r, err := doRequest(ctx, c, http.MethodPost, claudeAPIURL, strings.NewReader("{}"), map[string]string{
+		"Content-Type": "application/json",
+	})
+	if err != nil {
+		if claudeUnsupportedRegions[region] {
+			return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区限制"}
+		}
+		return reqFailed("claude")
+	}
+	if claudeUnsupportedRegions[region] {
+		return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区限制"}
+	}
+	body := strings.ToLower(string(r.Body))
+	if r.StatusCode == 403 && (strings.Contains(body, "not allowed") ||
+		strings.Contains(body, "unsupported") ||
+		strings.Contains(body, "country") ||
+		strings.Contains(body, "region")) {
+		return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区限制"}
+	}
+	if r.StatusCode == 401 || r.StatusCode == 400 || r.StatusCode == 200 {
+		return model.UnlockResult{Status: model.StatusUnlock, Region: region}
+	}
+	return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: fmt.Sprintf("HTTP %d (%db)", r.StatusCode, len(r.Body))}
+}
+
+func checkClaudeLegacy(ctx context.Context, c *http.Client) model.UnlockResult {
 	r, err := doGet(ctx, c, claudeURL)
 	if err != nil {
 		return reqFailed("claude")
@@ -181,7 +241,7 @@ func checkPerplexity(ctx context.Context, d model.Dialer) model.UnlockResult {
 
 // checkSora 通过 OpenAI 平台 /v1/videos 检测 Sora 区域可用性：
 // geo 检查先于鉴权，无 key 时 403+unsupported_country 即地区封锁，401 即地区支持。
-// 地区取自 chat.openai.com cdn-cgi/trace。
+// 地区与 compliance 结果在单节点 RunAI 内通过上下文缓存与 checkOpenAI 共享。
 func checkSora(ctx context.Context, d model.Dialer) model.UnlockResult {
 	c := newClient(d, true)
 	r, err := doGet(ctx, c, soraAPIURL)
@@ -189,7 +249,7 @@ func checkSora(ctx context.Context, d model.Dialer) model.UnlockResult {
 		return reqFailed("sora")
 	}
 	region := ""
-	if trace, terr := doGet(ctx, c, openAITraceURL); terr == nil {
+	if trace, terr := fetchOpenAITrace(ctx, c); terr == nil {
 		region = traceRegion(trace.Body)
 	}
 	if r.StatusCode == 401 || r.StatusCode == 200 {
@@ -201,12 +261,7 @@ func checkSora(ctx context.Context, d model.Dialer) model.UnlockResult {
 	}
 	// OpenAI 现网未鉴权访问 /v1/videos 可能直接返回 404，此时回退查询 compliance 接口判断区域可用性。
 	if r.StatusCode == 404 {
-		comp, cerr := doRequest(ctx, c, http.MethodGet, openAIComplianceURL, nil, map[string]string{
-			"Authorization": "Bearer null",
-			"Content-Type":  "application/json",
-			"Origin":        "https://platform.openai.com",
-			"Referer":       "https://platform.openai.com/",
-		})
+		comp, cerr := fetchOpenAICompliance(ctx, c)
 		if cerr == nil {
 			if strings.Contains(strings.ToLower(string(comp.Body)), "unsupported_country") {
 				return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区限制"}

@@ -2,9 +2,13 @@ package unlock
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -628,4 +632,398 @@ func TestOpenAICountryBlockedSurvivesIOSFailure(t *testing.T) {
 	if res.Status != model.StatusFailed || res.Region != "CN" || res.Info != "地区不支持" {
 		t.Fatalf("期望即使 ios 探针出错仍返回地区不支持，得到 %+v", res)
 	}
+}
+
+func TestDesktopUAModernChrome(t *testing.T) {
+	if !strings.Contains(desktopUA, "Chrome/131.0.0.0") {
+		t.Fatalf("期望 desktopUA 为现代 Chrome 版本，得到 %q", desktopUA)
+	}
+}
+
+func TestNetflixFullUnlockShortCircuitsOriginal(t *testing.T) {
+	var origHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/title/81280792", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`<html>{"requestCountry":{"id":"JP"}}</html>`))
+	})
+	mux.HandleFunc("/title/80057281", func(w http.ResponseWriter, r *http.Request) {
+		origHits.Add(1)
+		w.WriteHeader(200)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	swapURL(t, &netflixNonOriginalID, srv.URL+"/title/81280792")
+	swapURL(t, &netflixOriginalID, srv.URL+"/title/80057281")
+
+	res := checkNetflix(context.Background(), directDialer())
+	if res.Status != model.StatusUnlock || res.Region != "JP" {
+		t.Fatalf("期望解锁(JP)，得到 %+v", res)
+	}
+	if origHits.Load() != 0 {
+		t.Fatalf("非自制剧已解锁时不应再请求自制剧页，实际请求次数=%d", origHits.Load())
+	}
+}
+
+func TestRunAIDedupOpenAIAndSora(t *testing.T) {
+	var traceHits, compHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openai-trace", func(w http.ResponseWriter, r *http.Request) {
+		traceHits.Add(1)
+		w.Write([]byte("loc=US\n"))
+	})
+	mux.HandleFunc("/trace", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("loc=US\n"))
+	})
+	mux.HandleFunc("/compliance", func(w http.ResponseWriter, r *http.Request) {
+		compHits.Add(1)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"cookie_requirements":{"required":false}}`))
+	})
+	mux.HandleFunc("/ios", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		w.Write([]byte(`{"cf_details":"dc","type":"dc"}`))
+	})
+	mux.HandleFunc("/v1/videos", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	})
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/401", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	swapURL(t, &openAITraceURL, srv.URL+"/openai-trace")
+	swapURL(t, &openAIComplianceURL, srv.URL+"/compliance")
+	swapURL(t, &openAIIOSURL, srv.URL+"/ios")
+	swapURL(t, &soraAPIURL, srv.URL+"/v1/videos")
+	swapURL(t, &copilotURL, srv.URL+"/ok")
+	swapURL(t, &geminiURL, srv.URL+"/ok")
+	swapURL(t, &llamaAPIURL, srv.URL+"/401")
+	swapURL(t, &claudeTraceURL, srv.URL+"/trace")
+	swapURL(t, &claudeAPIURL, srv.URL+"/401")
+	swapURL(t, &perplexityAPIURL, srv.URL+"/401")
+	swapURL(t, &perplexityTraceURL, srv.URL+"/trace")
+	swapURL(t, &grokURL, srv.URL+"/ok")
+
+	findPlatform := func(res []model.UnlockResult, name string) model.UnlockResult {
+		for _, r := range res {
+			if r.Platform == name {
+				return r
+			}
+		}
+		t.Fatalf("未找到平台 %s", name)
+		return model.UnlockResult{}
+	}
+
+	first := RunAI(context.Background(), directDialer())
+	if r := findPlatform(first, "openai"); r.Status != model.StatusUnlock || r.Region != "US" {
+		t.Fatalf("首次 RunAI openai 期望解锁(US)，得到 %+v", r)
+	}
+	if r := findPlatform(first, "sora"); r.Status != model.StatusUnlock || r.Region != "US" {
+		t.Fatalf("首次 RunAI sora 期望解锁(US)，得到 %+v", r)
+	}
+	if traceHits.Load() != 1 || compHits.Load() != 1 {
+		t.Fatalf("单节点 RunAI 内 openAITrace/openAICompliance 应各仅请求 1 次，实际 trace=%d compliance=%d",
+			traceHits.Load(), compHits.Load())
+	}
+
+	// 第二次 RunAI 代表另一节点，必须独立重新请求，不跨节点串缓存。
+	second := RunAI(context.Background(), directDialer())
+	if r := findPlatform(second, "sora"); r.Status != model.StatusUnlock || r.Region != "US" {
+		t.Fatalf("第二次 RunAI sora 期望解锁(US)，得到 %+v", r)
+	}
+	if traceHits.Load() != 2 || compHits.Load() != 2 {
+		t.Fatalf("跨节点第二次 RunAI 应各自请求一次，实际 trace=%d compliance=%d",
+			traceHits.Load(), compHits.Load())
+	}
+}
+
+func TestClaudeAPIFlow(t *testing.T) {
+	setupClaudeAPIMock := func(t *testing.T, traceBody string, apiCode int, apiBody string) {
+		t.Helper()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/trace", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(traceBody))
+		})
+		mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("期望 POST 方法，得到 %s", r.Method)
+			}
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("期望 Content-Type: application/json，得到 %q", got)
+			}
+			b, _ := io.ReadAll(r.Body)
+			if string(b) != "{}" {
+				t.Errorf("期望请求体 {}，得到 %q", string(b))
+			}
+			w.WriteHeader(apiCode)
+			w.Write([]byte(apiBody))
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		swapURL(t, &claudeTraceURL, srv.URL+"/trace")
+		swapURL(t, &claudeAPIURL, srv.URL+"/v1/messages")
+	}
+
+	t.Run("US_401_Unlock", func(t *testing.T) {
+		setupClaudeAPIMock(t, "loc=US\n", 401, `{"type":"error","error":{"type":"authentication_error"}}`)
+		res := checkClaude(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "US" {
+			t.Fatalf("期望解锁(US)，得到 %+v", res)
+		}
+	})
+
+	t.Run("JP_400_Unlock", func(t *testing.T) {
+		setupClaudeAPIMock(t, "loc=JP\n", 400, `{"type":"error","error":{"type":"invalid_request_error"}}`)
+		res := checkClaude(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "JP" {
+			t.Fatalf("期望解锁(JP)，得到 %+v", res)
+		}
+	})
+
+	t.Run("UnsupportedRegion_HK_EvenOn401", func(t *testing.T) {
+		setupClaudeAPIMock(t, "loc=HK\n", 401, `{"type":"error","error":{"type":"authentication_error"}}`)
+		res := checkClaude(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "HK" {
+			t.Fatalf("HK 即使 API 返回 401 也应判失败，得到 %+v", res)
+		}
+	})
+
+	t.Run("HTTP403_UnsupportedMessage", func(t *testing.T) {
+		setupClaudeAPIMock(t, "loc=US\n", 403, `{"error":{"message":"Requests from this country or region are not allowed"}}`)
+		res := checkClaude(context.Background(), directDialer())
+		if res.Status != model.StatusFailed {
+			t.Fatalf("期望失败，得到 %+v", res)
+		}
+	})
+
+	t.Run("HTTP403_CloudflareChallenge", func(t *testing.T) {
+		setupClaudeAPIMock(t, "loc=US\n", 403, `<html><title>Just a moment...</title></html>`)
+		res := checkClaude(context.Background(), directDialer())
+		if res.Status != model.StatusFailed {
+			t.Fatalf("期望失败，得到 %+v", res)
+		}
+	})
+}
+
+func TestTikTokHKNotFoundAndFallback(t *testing.T) {
+	t.Run("HKNotFound_Redirect", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/explore", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/hk/notfound", http.StatusFound)
+		})
+		mux.HandleFunc("/hk/notfound", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(404)
+			w.Write([]byte(`<html>Not Found</html>`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &tiktokAPIURL, srv.URL+"/explore")
+
+		res := checkTikTok(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "HK" {
+			t.Fatalf("期望失败(HK)，得到 %+v", res)
+		}
+	})
+
+	t.Run("HKNotFound_BodyURL", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`<link rel="canonical" href="https://www.tiktok.com/hk/notfound">`))
+		}))
+		defer srv.Close()
+		swapURL(t, &tiktokAPIURL, srv.URL)
+
+		res := checkTikTok(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "HK" {
+			t.Fatalf("期望失败(HK)，得到 %+v", res)
+		}
+	})
+
+	t.Run("ExploreMissesRegion_FallbackToHomeUnlock", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/explore", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`<html>explore without region</html>`))
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`<html><script>{"region":"sg"}</script></html>`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &tiktokAPIURL, srv.URL+"/explore")
+		swapURL(t, &tiktokURL, srv.URL+"/")
+
+		res := checkTikTok(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "SG" {
+			t.Fatalf("期望回退首页解锁(SG)，得到 %+v", res)
+		}
+	})
+
+	t.Run("ExploreMissesRegion_FallbackHKNotFound", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/explore", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`<html>explore without region</html>`))
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/hk/notfound", http.StatusFound)
+		})
+		mux.HandleFunc("/hk/notfound", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(404)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &tiktokAPIURL, srv.URL+"/explore")
+		swapURL(t, &tiktokURL, srv.URL+"/")
+
+		res := checkTikTok(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "HK" {
+			t.Fatalf("期望回退首页命中 HK 封锁，得到 %+v", res)
+		}
+	})
+}
+
+func TestDisneyPlusBamgridAndLegacy(t *testing.T) {
+	t.Run("Bamgrid_Unlock_US", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+disneyAuthToken {
+				t.Errorf("/devices Authorization 不符: %q", r.Header.Get("Authorization"))
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["deviceFamily"] != "browser" || body["applicationRuntime"] != "chrome" || body["deviceProfile"] != "windows" {
+				t.Errorf("/devices JSON 体不符: %+v err=%v", body, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"assertion":"dev-assertion-123"}`))
+		})
+		mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != disneyAuthToken {
+				t.Errorf("/token Authorization 应为裸 token，实际: %q", r.Header.Get("Authorization"))
+			}
+			if err := r.ParseForm(); err != nil || r.Form.Get("subject_token") != "dev-assertion-123" || r.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:token-exchange" {
+				t.Errorf("/token 表单参数不符: %+v err=%v", r.Form, err)
+			}
+			w.Write([]byte(`{"access_token":"acc","refresh_token":"ref-xyz"}`))
+		})
+		mux.HandleFunc("/graph/v1/device/graphql", func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != disneyAuthToken {
+				t.Errorf("/graphql Authorization 应为裸 token，实际: %q", r.Header.Get("Authorization"))
+			}
+			b, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(b), "refreshToken") || !strings.Contains(string(b), "sessionId") || !strings.Contains(string(b), "ref-xyz") {
+				t.Errorf("/graphql 请求体未包含 refreshToken/sessionId: %s", string(b))
+			}
+			w.Write([]byte(`{"data":{"refreshToken":{"activeSession":{"sessionId":"sess-1"}}},"extensions":{"sdk":{"session":{"inSupportedLocation":true,"location":{"countryCode":"us"}}}}}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &disneyDevicesURL, srv.URL+"/devices")
+		swapURL(t, &disneyTokenURL, srv.URL+"/token")
+		swapURL(t, &disneyGraphQLURL, srv.URL+"/graph/v1/device/graphql")
+
+		res := checkDisneyPlus(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "US" {
+			t.Fatalf("期望解锁(US)，得到 %+v", res)
+		}
+	})
+
+	t.Run("Bamgrid_ForbiddenLocation_400", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"assertion":"dev-assertion-123"}`))
+		})
+		mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"unauthorized_client","error_description":"forbidden-location"}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &disneyDevicesURL, srv.URL+"/devices")
+		swapURL(t, &disneyTokenURL, srv.URL+"/token")
+		swapURL(t, &disneyGraphQLURL, srv.URL+"/graph/v1/device/graphql")
+
+		res := checkDisneyPlus(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Info != "地区限制" {
+			t.Fatalf("期望地区限制失败，得到 %+v", res)
+		}
+	})
+
+	t.Run("Bamgrid_InSupportedLocationFalse", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"assertion":"dev-assertion-123"}`))
+		})
+		mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"refresh_token":"ref-xyz"}`))
+		})
+		mux.HandleFunc("/graph/v1/device/graphql", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":{"refreshToken":{"activeSession":{"sessionId":"sess-2"}}},"extensions":{"sdk":{"session":{"inSupportedLocation":false,"location":{"countryCode":"HK"}}}}}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &disneyDevicesURL, srv.URL+"/devices")
+		swapURL(t, &disneyTokenURL, srv.URL+"/token")
+		swapURL(t, &disneyGraphQLURL, srv.URL+"/graph/v1/device/graphql")
+
+		res := checkDisneyPlus(context.Background(), directDialer())
+		if res.Status != model.StatusFailed || res.Region != "HK" {
+			t.Fatalf("期望地区不支持失败(HK)，得到 %+v", res)
+		}
+	})
+
+	t.Run("Bamgrid_DataActiveSessionFallback", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"assertion":"dev-assertion-123"}`))
+		})
+		mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"refresh_token":"ref-xyz"}`))
+		})
+		mux.HandleFunc("/graph/v1/device/graphql", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":{"refreshToken":{"activeSession":{"inSupportedLocation":true,"location":{"countryCode":"jp"}}}}}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		swapURL(t, &disneyDevicesURL, srv.URL+"/devices")
+		swapURL(t, &disneyTokenURL, srv.URL+"/token")
+		swapURL(t, &disneyGraphQLURL, srv.URL+"/graph/v1/device/graphql")
+
+		res := checkDisneyPlus(context.Background(), directDialer())
+		if res.Status != model.StatusUnlock || res.Region != "JP" {
+			t.Fatalf("期望解锁(JP)，得到 %+v", res)
+		}
+	})
+
+	t.Run("Legacy_BackwardsCompat", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(`<html>Disney+</html>`))
+		})
+		mux.HandleFunc("/blocked", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/unavailable", http.StatusFound)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		swapURL(t, &disneyPlusURL, srv.URL+"/ok")
+		if res := checkDisneyPlus(context.Background(), directDialer()); res.Status != model.StatusUnlock {
+			t.Fatalf("旧版兼容路径期望解锁，得到 %+v", res)
+		}
+
+		swapURL(t, &disneyPlusURL, srv.URL+"/blocked")
+		if res := checkDisneyPlus(context.Background(), directDialer()); res.Status != model.StatusFailed {
+			t.Fatalf("旧版兼容路径期望失败，得到 %+v", res)
+		}
+	})
 }

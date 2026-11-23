@@ -26,6 +26,9 @@ class NekoSpeedRunner(private val context: Context) {
     private val fontStamp: File
         get() = File(context.filesDir, ".font_version")
 
+    private val geoipDir: File
+        get() = File(context.filesDir, "geoip")
+
     private val fontAsset = "fonts/NotoSansCJKsc-Regular.otf"
 
     private val compressedAssets: List<String>
@@ -124,7 +127,7 @@ class NekoSpeedRunner(private val context: Context) {
         tests: List<String>,
         threads: Int = 8,
         duration: Int = 10,
-        concurrency: Int = 1,
+        concurrency: Int = 4,
         pingCount: Int = 4,
         filter: String? = null,
         exclude: String? = null,
@@ -136,6 +139,7 @@ class NekoSpeedRunner(private val context: Context) {
         val outDir = File(context.filesDir, "out")
         outDir.deleteRecursively()
         outDir.mkdirs()
+        geoipDir.mkdirs()
 
         val args = mutableListOf(
             binary.absolutePath,
@@ -201,17 +205,22 @@ class NekoSpeedRunner(private val context: Context) {
     }
 
     private fun startProcess(outDir: File, args: List<String>): Process =
-        ProcessBuilder(args)
-            .redirectErrorStream(true)
-            .directory(outDir)
-            .start()
+        startConfiguredProcess(outDir, args)
 
     /** Android 14+ SELinux 拒绝直接 execve app_data_file，回退经动态链接器执行 */
     private fun startProcessViaLinker(outDir: File, args: List<String>): Process =
-        ProcessBuilder(listOf("/system/bin/linker64") + args)
+        startConfiguredProcess(outDir, listOf("/system/bin/linker64") + args)
+
+    private fun startConfiguredProcess(outDir: File, command: List<String>): Process {
+        val geoDir = geoipDir.apply { mkdirs() }
+        return ProcessBuilder(command)
             .redirectErrorStream(true)
             .directory(outDir)
+            .apply {
+                environment()["NEKOSPEED_GEOIP_DIR"] = geoDir.absolutePath
+            }
             .start()
+    }
 
     fun cancel() {
         currentProcess?.destroyForcibly()

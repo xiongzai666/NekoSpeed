@@ -153,8 +153,7 @@ func renderTables(meta Meta, title, footer1 string, tables []*Table) (*image.RGB
 		},
 		footItem{
 			icon: "clock",
-			text: fmt.Sprintf("测试时间=%s (CST) 测试结果仅供参考，以实际情况为准",
-				meta.StartTime.Local().Format("2006-01-02T15:04:05")),
+			text: formatFooterTimeText(meta.StartTime),
 		},
 	)
 
@@ -221,6 +220,11 @@ func renderTables(meta Meta, title, footer1 string, tables []*Table) (*image.RGB
 	// 水印（最上层，斜向平铺）
 	drawWatermark(p.img, p.wmFace, sanitize(p.wmFace, meta.Watermark), theme.Watermark)
 	return p.img, nil
+}
+
+func formatFooterTimeText(startTime time.Time) string {
+	return fmt.Sprintf("测试时间=%s 测试结果仅供参考，以实际情况为准",
+		startTime.Local().Format("2006-01-02T15:04:05 (MST)"))
 }
 
 func (t *Table) totalWidth() int {

@@ -23,7 +23,7 @@ jobs:
       GOTOOLCHAIN: auto
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -85,7 +85,7 @@ jobs:
 
       - name: Setup Go
         if: steps.check.outputs.should_release == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -176,7 +176,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: steps.check.outputs.should_release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
           name: "NekoSpeed ${{ steps.tag.outputs.tag_name }} (mihomo ${{ steps.check.outputs.latest }})"
@@ -186,7 +186,9 @@ jobs:
             - **上游仓库同步**：已同步 [`KaWaIDeSuNe/NekoSpeed`](https://github.com/KaWaIDeSuNe/NekoSpeed) 最新提交（本次新增合并提交数：`${{ steps.check.outputs.upstream_commits }}`）
             - **Mihomo 内核版本**：[`${{ steps.check.outputs.latest }}`](https://github.com/MetaCubeX/mihomo/releases/tag/${{ steps.check.outputs.latest }})
             - **分支增强特性**：
-              - 自动识别并绑定物理网卡（Windows `IP_UNICAST_IF` / macOS `IP_BOUND_IF`），自动绕过本地 Clash TUN 与 `198.18.0.0/15` Fake-IP，防止代理套代理
-              - 极简双行 WebUI 控制台（支持按需挑节点、实时单节点流式上屏、免重测 0.3s 重绘主题/排序、一键复制图片到剪贴板、导出 CSV）
+              - 自动识别并绑定物理网卡（Windows `IP_UNICAST_IF` / macOS `IP_BOUND_IF`），绕过本地 Clash TUN 并防御 IPv4 (`198.18.0.0/15`) 与 IPv6 (`fc00::/7` / `2001:2::/48`) Fake-IP，支持 IPv6 节点预检兜底，防止代理套代理
+              - 多库协同离线 GeoIP 引擎（`GeoCN.mmdb` + `ipinfo_lite.mmdb` / `GeoLite2-ASN.mmdb` + `GeoLite2-City.mmdb`），支持便携目录自动发现、并发更新校验与中文化地区/城市拓扑渲染
+              - RFC 5780 STUN NAT 探测增强（优先使用支持 `OTHER-ADDRESS` 的标准服务器并直连解析绕过 Fake-IP，避免 NAT 类型误判）
+              - 升级版内嵌 WebUI 控制台（环境与 GeoIP 状态浮层、智能粘贴识别、按需挑节点、实时单节点流式上屏与延迟/解锁可视化、免重测快速重绘、全宽报告画廊与同源安全防护）
               - Windows 版支持直接双击 `nekospeed-windows-amd64.exe` 一键启动 WebUI (`http://127.0.0.1:18189`)
           files: dist/release/*

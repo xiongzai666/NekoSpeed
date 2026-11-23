@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,9 +92,6 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 	} else if o.Threads == 1 {
 		o.Single = true
 	}
-	if err := subscription.SetProxy(o.Proxy); err != nil {
-		return nil, err
-	}
 
 	netEnv := nodepool.RefreshNetworkEnv()
 	if netEnv.PhysicalInterface != "" {
@@ -108,7 +106,7 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 	testSet := parseTests(o.Tests)
 
 	// 1. 加载订阅
-	nodes, subName, err := subscription.Load(o.Source)
+	nodes, subName, err := subscription.LoadContext(ctx, o.Source, o.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("加载订阅失败: %w", err)
 	}
@@ -193,49 +191,9 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 	logf("GeoIP：%s", resolver.ModeSummary())
 
 	// 3. 并发测试：非带宽探测项按 Concurrency 并发执行，下载测速由独立 speedSem（容量 1）串行化，兼顾速度与准确性。
-	concurrency := o.Concurrency
-	if concurrency <= 0 {
-		concurrency = 6
-	}
-	results := make([]*model.NodeResult, len(nodes))
-	sem := make(chan struct{}, concurrency)
-	speedSem := make(chan struct{}, 1)
 	ucache := newUnlockCache()
-	maxBytes := int64(o.MaxMB) * 1024 * 1024
-	var wg sync.WaitGroup
-	var doneCount int32
 	start := time.Now()
-	for i, node := range nodes {
-		results[i] = &model.NodeResult{Node: node}
-		wg.Add(1)
-		go func(i int, node model.Node) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				results[i].Err = "任务已取消"
-				return
-			}
-			defer func() { <-sem }()
-			testNode(ctx, node, results[i], testSet, testOpts{
-				threads:     o.Threads,
-				duration:    o.Duration,
-				maxBytes:    maxBytes,
-				speedURL:    o.SpeedURL,
-				pingURL:     o.PingURL,
-				pingCount:   o.PingCount,
-				resolver:    resolver,
-				speedSem:    speedSem,
-				unlockCache: ucache,
-			})
-			done := int(atomic.AddInt32(&doneCount, 1))
-			logf("[%d/%d] %s 完成", done, len(nodes), node.Name)
-			if o.OnNodeDone != nil {
-				o.OnNodeDone(done, len(nodes), results[i])
-			}
-		}(i, node)
-	}
-	wg.Wait()
+	results := runNodes(ctx, nodes, testSet, o, resolver, ucache, logf)
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("测试已取消")
 	}
@@ -345,15 +303,81 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 }
 
 type testOpts struct {
-	threads     int
-	duration    int
-	maxBytes    int64
-	speedURL    string
-	pingURL     string
-	pingCount   int
-	resolver    *geo.Resolver
-	speedSem    chan struct{}
-	unlockCache *unlockCache
+	threads      int
+	duration     int
+	maxBytes     int64
+	speedURL     string
+	pingURL      string
+	pingCount    int
+	resolver     *geo.Resolver
+	speedSem     chan struct{}
+	releaseProbe func()
+	unlockCache  *unlockCache
+}
+
+var (
+	newDialerFn   = nodepool.NewDialer
+	latencyTestFn = tester.Latency
+	natTestFn     = tester.NAT
+	speedTestFn   = tester.SpeedWithLimit
+)
+
+func runNodes(
+	ctx context.Context,
+	nodes []model.Node,
+	testSet []string,
+	o Options,
+	resolver *geo.Resolver,
+	ucache *unlockCache,
+	logf func(format string, args ...any),
+) []*model.NodeResult {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	concurrency := o.Concurrency
+	if concurrency <= 0 {
+		concurrency = 6
+	}
+	results := make([]*model.NodeResult, len(nodes))
+	sem := make(chan struct{}, concurrency)
+	speedSem := make(chan struct{}, 1)
+	maxBytes := int64(o.MaxMB) * 1024 * 1024
+	var wg sync.WaitGroup
+	var doneCount int32
+	for i, node := range nodes {
+		results[i] = &model.NodeResult{Node: node}
+		wg.Add(1)
+		go func(i int, node model.Node) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i].Err = "任务已取消"
+				return
+			}
+			releaseProbe := sync.OnceFunc(func() { <-sem })
+			defer releaseProbe()
+			testNode(ctx, node, results[i], testSet, testOpts{
+				threads:      o.Threads,
+				duration:     o.Duration,
+				maxBytes:     maxBytes,
+				speedURL:     o.SpeedURL,
+				pingURL:      o.PingURL,
+				pingCount:    o.PingCount,
+				resolver:     resolver,
+				speedSem:     speedSem,
+				releaseProbe: releaseProbe,
+				unlockCache:  ucache,
+			})
+			done := int(atomic.AddInt32(&doneCount, 1))
+			logf("[%d/%d] %s 完成", done, len(nodes), node.Name)
+			if o.OnNodeDone != nil {
+				o.OnNodeDone(done, len(nodes), results[i])
+			}
+		}(i, node)
+	}
+	wg.Wait()
+	return results
 }
 
 // testNode 对单个节点执行选中的测试项，结果写入 r。
@@ -362,15 +386,18 @@ func testNode(ctx context.Context, node model.Node, r *model.NodeResult, testSet
 		r.Err = "任务已取消"
 		return
 	}
-	dialer, err := nodepool.NewDialer(node)
+	dialer, err := newDialerFn(node)
 	if err != nil {
 		r.Err = err.Error()
 		return
 	}
+	if c, ok := dialer.(io.Closer); ok {
+		defer c.Close()
+	}
 
 	needLatency := hasTest(testSet, "speed") || hasTest(testSet, "media")
 	if needLatency {
-		r.Latency = tester.Latency(ctx, dialer, o.pingURL, o.pingCount)
+		r.Latency = latencyTestFn(ctx, dialer, o.pingURL, o.pingCount)
 		// 延迟测试 100% 丢包说明代理通道不可用，直接熔断后续测速与解锁探测，仅保留入口 IP 解析。
 		if r.Latency.PacketLoss >= 1.0 && r.Latency.AvgHTTPS == 0 {
 			if o.resolver != nil {
@@ -399,7 +426,7 @@ func testNode(ctx context.Context, node model.Node, r *model.NodeResult, testSet
 	}
 
 	if hasTest(testSet, "nat") && ctx.Err() == nil {
-		r.NAT = tester.NAT(ctx, dialer)
+		r.NAT = natTestFn(ctx, dialer)
 	}
 	if hasTest(testSet, "media") && ctx.Err() == nil {
 		if o.unlockCache != nil && outIP != "" {
@@ -416,6 +443,10 @@ func testNode(ctx context.Context, node model.Node, r *model.NodeResult, testSet
 		}
 	}
 	if hasTest(testSet, "speed") && ctx.Err() == nil {
+		// 非带宽探测已结束：先归还并发探测槽位，再等待串行测速锁，避免后续节点的探测饥饿。
+		if o.releaseProbe != nil {
+			o.releaseProbe()
+		}
 		if o.speedSem != nil {
 			select {
 			case o.speedSem <- struct{}{}:
@@ -424,7 +455,7 @@ func testNode(ctx context.Context, node model.Node, r *model.NodeResult, testSet
 				return
 			}
 		}
-		r.Speed = tester.SpeedWithLimit(ctx, dialer, o.speedURL, o.threads, o.duration, o.maxBytes)
+		r.Speed = speedTestFn(ctx, dialer, o.speedURL, o.threads, o.duration, o.maxBytes)
 	}
 }
 

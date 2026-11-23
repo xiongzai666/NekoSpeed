@@ -50,27 +50,36 @@ var explicitProxy bool
 // SetProxy 设置订阅拉取使用的代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）。
 // 传空字符串恢复为默认的环境变量代理。订阅域名被 DNS 污染 / SNI 重置时通常需要走代理拉取。
 func SetProxy(proxy string) error {
+	pfn, explicit, err := parseProxyFunc(proxy)
+	if err != nil {
+		return err
+	}
+	proxyMu.Lock()
+	proxyFn = pfn
+	explicitProxy = explicit
+	proxyMu.Unlock()
+	return nil
+}
+
+func parseProxyFunc(proxy string) (func(*http.Request) (*url.URL, error), bool, error) {
 	if proxy == "" {
-		proxyMu.Lock()
-		proxyFn = http.ProxyFromEnvironment
-		explicitProxy = false
-		proxyMu.Unlock()
-		return nil
+		return http.ProxyFromEnvironment, false, nil
 	}
 	u, err := url.Parse(proxy)
 	if err != nil {
-		return fmt.Errorf("解析代理地址 %q 失败: %w", proxy, err)
+		return nil, false, fmt.Errorf("解析代理地址 %q 失败: %w", proxy, err)
 	}
 	switch u.Scheme {
 	case "http", "https", "socks5", "socks5h":
 	default:
-		return fmt.Errorf("不支持的代理协议 %q（支持 http/https/socks5）", u.Scheme)
+		return nil, false, fmt.Errorf("不支持的代理协议 %q（支持 http/https/socks5）", u.Scheme)
 	}
-	proxyMu.Lock()
-	proxyFn = http.ProxyURL(u)
-	explicitProxy = true
-	proxyMu.Unlock()
-	return nil
+	return http.ProxyURL(u), true, nil
+}
+
+type fetchConfig struct {
+	proxyFn       func(*http.Request) (*url.URL, error)
+	explicitProxy bool
 }
 
 // Load 从 source 加载节点。source 为 http(s) URL 时发起 GET 拉取，否则按本地文件读取。
@@ -78,6 +87,35 @@ func SetProxy(proxy string) error {
 // 否则尝试整体 base64 解码后按行解析分享链接；原文本直接以协议 scheme 开头时直接按行解析。
 // 同时返回尽可能提取到的订阅名称（用于输出文件名前缀）。
 func Load(source string) ([]model.Node, string, error) {
+	proxyMu.RLock()
+	cfg := fetchConfig{
+		proxyFn:       proxyFn,
+		explicitProxy: explicitProxy,
+	}
+	proxyMu.RUnlock()
+	return loadWithConfig(context.Background(), source, cfg)
+}
+
+// LoadContext 与 Load 相同，但支持通过 ctx 取消请求/退避等待，并为本次调用单独指定 proxy，
+// 不修改全局 proxyFn / explicitProxy 状态，适合 Web UI 等并发场景。
+func LoadContext(ctx context.Context, source, proxy string) ([]model.Node, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pfn, explicit, err := parseProxyFunc(proxy)
+	if err != nil {
+		return nil, "", err
+	}
+	return loadWithConfig(ctx, source, fetchConfig{
+		proxyFn:       pfn,
+		explicitProxy: explicit,
+	})
+}
+
+func loadWithConfig(ctx context.Context, source string, cfg fetchConfig) ([]model.Node, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", fmt.Errorf("读取订阅 %q: %w", source, err)
+	}
 	var (
 		data   []byte
 		name   string
@@ -85,7 +123,7 @@ func Load(source string) ([]model.Node, string, error) {
 		err    error
 	)
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		data, header, err = fetch(source)
+		data, header, err = fetchWithConfig(ctx, source, cfg)
 		name = extractName(source, data, header)
 	} else {
 		data, err = os.ReadFile(source)
@@ -93,7 +131,7 @@ func Load(source string) ([]model.Node, string, error) {
 		// 此时按 URL 拉取。
 		if err == nil {
 			if s := strings.TrimSpace(string(data)); strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
-				data, header, err = fetch(s)
+				data, header, err = fetchWithConfig(ctx, s, cfg)
 				name = extractName(s, data, header)
 			} else {
 				name = extractName(source, data, nil)
@@ -110,10 +148,10 @@ func Load(source string) ([]model.Node, string, error) {
 	return nodes, name, nil
 }
 
-// fetch HTTP GET 拉取订阅内容，返回响应体与响应头。
+// fetchWithConfig HTTP GET 拉取订阅内容，返回响应体与响应头。
 // 失败时自动重试 fetchRetry 次；第二次起降级到 HTTP/1.1，避免部分机场对 HTTP/2 或 TLS fingerprint 的风控。
 // 若在本机 TUN 开启且未显式指定代理时遭遇 403，回退至绑定物理网卡直连拉取以绕过部分机场的海外 IP 拦截。
-func fetch(targetURL string) ([]byte, http.Header, error) {
+func fetchWithConfig(ctx context.Context, targetURL string, cfg fetchConfig) ([]byte, http.Header, error) {
 	var (
 		lastErr        error
 		data           []byte
@@ -122,29 +160,42 @@ func fetch(targetURL string) ([]byte, http.Header, error) {
 		directPhysical bool
 	)
 	for attempt := 0; attempt < fetchRetry; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		forceHTTP11 := attempt > 0
-		data, header, statusCode, lastErr = fetchOnce(targetURL, forceHTTP11, directPhysical)
+		data, header, statusCode, lastErr = fetchOnce(ctx, targetURL, forceHTTP11, directPhysical, cfg)
 		if lastErr == nil {
 			return data, header, nil
 		}
-		if !directPhysical && statusCode == http.StatusForbidden && shouldFallbackDirectPhysical(targetURL, nodepool.GetNetworkEnv().TUNDetected, http.ProxyFromEnvironment) {
+		if ctx.Err() != nil {
+			return nil, nil, lastErr
+		}
+		if !directPhysical && statusCode == http.StatusForbidden && shouldFallbackDirectPhysicalWithExplicit(targetURL, nodepool.GetNetworkEnv().TUNDetected, cfg.explicitProxy, http.ProxyFromEnvironment) {
 			directPhysical = true
 		}
 		if attempt < fetchRetry-1 {
-			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			timer := time.NewTimer(time.Duration(attempt+1) * 500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return nil, nil, lastErr
 }
 
 func shouldFallbackDirectPhysical(targetURL string, tunDetected bool, envProxyFn func(*http.Request) (*url.URL, error)) bool {
-	if !tunDetected {
-		return false
-	}
 	proxyMu.RLock()
 	hasExplicit := explicitProxy
 	proxyMu.RUnlock()
-	if hasExplicit {
+	return shouldFallbackDirectPhysicalWithExplicit(targetURL, tunDetected, hasExplicit, envProxyFn)
+}
+
+func shouldFallbackDirectPhysicalWithExplicit(targetURL string, tunDetected, hasExplicit bool, envProxyFn func(*http.Request) (*url.URL, error)) bool {
+	if !tunDetected || hasExplicit {
 		return false
 	}
 	u, err := url.Parse(targetURL)
@@ -167,16 +218,14 @@ func shouldFallbackDirectPhysical(targetURL string, tunDetected bool, envProxyFn
 	return true
 }
 
-func fetchOnce(targetURL string, forceHTTP11, directPhysical bool) ([]byte, http.Header, int, error) {
-	proxyMu.RLock()
-	proxy := proxyFn
-	proxyMu.RUnlock()
+func fetchOnce(ctx context.Context, targetURL string, forceHTTP11, directPhysical bool, cfg fetchConfig) ([]byte, http.Header, int, error) {
 	transport := &http.Transport{
-		Proxy: proxy,
+		Proxy: cfg.proxyFn,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 		},
 	}
+	defer transport.CloseIdleConnections()
 	if directPhysical {
 		transport.Proxy = nil
 		transport.DialContext = nodepool.DialDirectContext
@@ -190,7 +239,7 @@ func fetchOnce(targetURL string, forceHTTP11, directPhysical bool) ([]byte, http
 		Timeout:   httpTimeout,
 		Transport: transport,
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, nil, 0, err
 	}

@@ -17,8 +17,15 @@ import (
 )
 
 const (
-	defaultAbemaCheckURL = "https://abema.tv/"
-	defaultAbemaAPIURL   = "https://api.abema.io/v1/ip/check?device=android"
+	defaultAbemaCheckURL    = "https://abema.tv/"
+	defaultAbemaAPIURL      = "https://api.abema.io/v1/ip/check?device=android"
+	defaultTikTokURL        = "https://www.tiktok.com/"
+	defaultTikTokAPIURL     = "https://www.tiktok.com/explore"
+	defaultDisneyPlusURL    = "https://www.disneyplus.com/"
+	defaultDisneyDevicesURL = "https://disney.api.edge.bamgrid.com/devices"
+	defaultDisneyTokenURL   = "https://disney.api.edge.bamgrid.com/token"
+	defaultDisneyGraphQLURL = "https://disney.api.edge.bamgrid.com/graph/v1/device/graphql"
+	disneyAuthToken         = "ZGlzbmV5JmJyb3dzZXImMS4wLjA.Cu56AgSfBTDag5NiRA81oLHkDZfu5L3CKadnefEAY84"
 )
 
 // 各平台检测端点（包内变量，测试时可替换为 httptest 服务器地址）。
@@ -26,10 +33,13 @@ var (
 	youtubeURL           = "https://www.youtube.com/premium"
 	netflixNonOriginalID = "https://www.netflix.com/title/81280792" // 非自制剧（乐高幻影忍者），各区库不同步
 	netflixOriginalID    = "https://www.netflix.com/title/80057281" // 自制剧（怪奇物语），有网飞即可看
-	disneyPlusURL        = "https://www.disneyplus.com/"
+	disneyPlusURL        = defaultDisneyPlusURL
+	disneyDevicesURL     = defaultDisneyDevicesURL
+	disneyTokenURL       = defaultDisneyTokenURL
+	disneyGraphQLURL     = defaultDisneyGraphQLURL
 	bilibiliPlayURL      = "https://api.bilibili.com/pgc/player/web/playurl?avid=18281381&cid=29892777&qn=0&type=&otype=json&ep_id=183799&fourk=1&fnver=0&fnval=16&module=bangumi" // 港澳台限定剧集（2026-07 验证：CN/US 返回 -10403）；旧剧集 ep_id=307247 已被纳入大陆片库会误判
-	tiktokURL            = "https://www.tiktok.com/"
-	tiktokAPIURL         = "https://www.tiktok.com/node/share/video/7049860927877885189"
+	tiktokURL            = defaultTikTokURL
+	tiktokAPIURL         = defaultTikTokAPIURL
 	daznStartupURL       = "https://startup.core.indazn.com/misl/v5/Startup"
 	abemaCheckURL        = defaultAbemaCheckURL
 	abemaAPIURL          = defaultAbemaAPIURL
@@ -46,8 +56,10 @@ var (
 	netflixLocRe = regexp.MustCompile(`"requestCountry"\s*:\s*\{[^}]*"id"\s*:\s*"([A-Z]{2})"`)
 	tiktokRegRe  = regexp.MustCompile(`"region"\s*:\s*"([a-zA-Z]{2})"`)
 	daznRegionRe = regexp.MustCompile(`"(?i:geoLocatedCountry|country|region)[A-Za-z]*"\s*:\s*"([A-Z]{2})"`)
-	steamCurrRe  = regexp.MustCompile(`itemprop="priceCurrency"\s+content="([A-Z]{3})"`)
-	bahamutGeoRe = regexp.MustCompile(`data-geo="([^"]+)"`)
+	steamCurrRe     = regexp.MustCompile(`itemprop="priceCurrency"\s+content="([A-Z]{3})"`)
+	bahamutGeoRe    = regexp.MustCompile(`data-geo="([^"]+)"`)
+	disneyInSupRe   = regexp.MustCompile(`"inSupportedLocation"\s*:\s*(true|false)`)
+	disneyCountryRe = regexp.MustCompile(`"countryCode"\s*:\s*"([A-Za-z]{2})"`)
 )
 
 // randHex16 生成 16 字节随机 hex（bilibili session 参数用）。
@@ -80,8 +92,9 @@ func checkYouTube(ctx context.Context, d model.Dialer) model.UnlockResult {
 	return model.UnlockResult{Status: model.StatusUnlock, Region: region}
 }
 
-// checkNetflix 分别请求非自制剧与自制剧页面（跟随重定向），页面含 "Oh no!" 即本区不可看：
-// 非自制可看 → 全解锁；仅自制可看 → 待解锁；均不可看 → 失败。
+// checkNetflix 优先请求非自制剧页面（跟随重定向），页面含 "Oh no!" 即本区不可看：
+// 非自制可看 → 立即返回全解锁，不再额外请求自制剧页；
+// 非自制不可看时再请求自制剧页：仅自制可看 → 待解锁；均不可看 → 失败。
 // 注意不能靠状态码判断：Netflix 对地区限制页也返回 200，特征在正文。
 func checkNetflix(ctx context.Context, d model.Dialer) model.UnlockResult {
 	c := newClient(d, true)
@@ -89,12 +102,7 @@ func checkNetflix(ctx context.Context, d model.Dialer) model.UnlockResult {
 	if err != nil {
 		return reqFailed("netflix")
 	}
-	original, err := doGet(ctx, c, netflixOriginalID)
-	if err != nil {
-		return reqFailed("netflix")
-	}
 	nonAvail := bytes.Contains(nonOriginal.Body, []byte("Oh no!"))
-	origAvail := bytes.Contains(original.Body, []byte("Oh no!"))
 	if !nonAvail {
 		region := ""
 		if m := netflixLocRe.FindSubmatch(nonOriginal.Body); m != nil {
@@ -102,14 +110,172 @@ func checkNetflix(ctx context.Context, d model.Dialer) model.UnlockResult {
 		}
 		return model.UnlockResult{Status: model.StatusUnlock, Region: region}
 	}
+	original, err := doGet(ctx, c, netflixOriginalID)
+	if err != nil {
+		return reqFailed("netflix")
+	}
+	origAvail := bytes.Contains(original.Body, []byte("Oh no!"))
 	if !origAvail {
 		return model.UnlockResult{Status: model.StatusPending}
 	}
 	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("非自制/自制均不可看 (%d/%d)", nonOriginal.StatusCode, original.StatusCode)}
 }
 
-// checkDisneyPlus 首页跳转 blocked/unavailable 即未解锁，否则视为解锁。
+// checkDisneyPlus 默认走 Bamgrid 官方设备注册 + token 交换 + GraphQL refreshToken 链路，
+// 精准核验 inSupportedLocation 与 countryCode；若测试仅替换了 disneyPlusURL，则兼容旧版首页检测。
 func checkDisneyPlus(ctx context.Context, d model.Dialer) model.UnlockResult {
+	if disneyPlusURL != defaultDisneyPlusURL &&
+		disneyDevicesURL == defaultDisneyDevicesURL &&
+		disneyTokenURL == defaultDisneyTokenURL &&
+		disneyGraphQLURL == defaultDisneyGraphQLURL {
+		return checkDisneyPlusLegacy(ctx, d)
+	}
+
+	c := newClient(d, true)
+	devHeaders := map[string]string{
+		"Authorization": "Bearer " + disneyAuthToken,
+		"Content-Type":  "application/json",
+	}
+
+	devBody := `{"deviceFamily":"browser","applicationRuntime":"chrome","deviceProfile":"windows","attributes":{}}`
+	devRes, err := doRequest(ctx, c, http.MethodPost, disneyDevicesURL, strings.NewReader(devBody), devHeaders)
+	if err != nil {
+		return reqFailed("disney_plus")
+	}
+	if devRes.StatusCode == 403 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "地区限制"}
+	}
+	if devRes.StatusCode == 429 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "HTTP 429"}
+	}
+	if devRes.StatusCode < 200 || devRes.StatusCode >= 300 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("devices HTTP %d", devRes.StatusCode)}
+	}
+	var devResp struct {
+		Assertion string `json:"assertion"`
+	}
+	if err := json.Unmarshal(devRes.Body, &devResp); err != nil || devResp.Assertion == "" {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "devices 无 assertion"}
+	}
+
+	form := url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"latitude":           {"0"},
+		"longitude":          {"0"},
+		"platform":           {"browser"},
+		"subject_token":      {devResp.Assertion},
+		"subject_token_type": {"urn:bamtech:params:oauth:token-type:device"},
+	}
+	// /token 与 /graphql 端点要求裸 token（不带 Bearer 前缀）。
+	tokRes, err := doRequest(ctx, c, http.MethodPost, disneyTokenURL, strings.NewReader(form.Encode()), map[string]string{
+		"Authorization": disneyAuthToken,
+		"Content-Type":  "application/x-www-form-urlencoded",
+	})
+	if err != nil {
+		return reqFailed("disney_plus")
+	}
+	if tokRes.StatusCode == 403 || strings.Contains(strings.ToLower(string(tokRes.Body)), "forbidden-location") {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "地区限制"}
+	}
+	if tokRes.StatusCode == 429 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "HTTP 429"}
+	}
+	if tokRes.StatusCode < 200 || tokRes.StatusCode >= 300 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("token HTTP %d", tokRes.StatusCode)}
+	}
+	var tokResp struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(tokRes.Body, &tokResp); err != nil || tokResp.RefreshToken == "" {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "token 无 refresh_token"}
+	}
+
+	gqlReq := struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables"`
+	}{
+		Query: "mutation refreshToken($input:RefreshTokenInput!) { refreshToken(refreshToken:$input) { activeSession { sessionId } } }",
+		Variables: map[string]any{
+			"input": map[string]string{
+				"refreshToken": tokResp.RefreshToken,
+			},
+		},
+	}
+	gqlPayload, err := json.Marshal(gqlReq)
+	if err != nil {
+		return reqFailed("disney_plus")
+	}
+	gqlRes, err := doRequest(ctx, c, http.MethodPost, disneyGraphQLURL, bytes.NewReader(gqlPayload), map[string]string{
+		"Authorization": disneyAuthToken,
+		"Content-Type":  "application/json",
+	})
+	if err != nil {
+		return reqFailed("disney_plus")
+	}
+	if gqlRes.StatusCode == 403 || strings.Contains(strings.ToLower(string(gqlRes.Body)), "forbidden-location") {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "地区限制"}
+	}
+	if gqlRes.StatusCode == 429 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "HTTP 429"}
+	}
+	if gqlRes.StatusCode < 200 || gqlRes.StatusCode >= 300 {
+		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("graphql HTTP %d", gqlRes.StatusCode)}
+	}
+
+	type disneySession struct {
+		InSupportedLocation *bool `json:"inSupportedLocation"`
+		Location            struct {
+			CountryCode string `json:"countryCode"`
+		} `json:"location"`
+	}
+	var gqlResp struct {
+		Data struct {
+			RefreshToken struct {
+				ActiveSession disneySession `json:"activeSession"`
+			} `json:"refreshToken"`
+		} `json:"data"`
+		Extensions struct {
+			SDK struct {
+				Session disneySession `json:"session"`
+			} `json:"sdk"`
+		} `json:"extensions"`
+	}
+	if err := json.Unmarshal(gqlRes.Body, &gqlResp); err != nil {
+		return model.UnlockResult{Status: model.StatusFailed, Info: "graphql 响应非 JSON"}
+	}
+
+	region := strings.ToUpper(strings.TrimSpace(gqlResp.Extensions.SDK.Session.Location.CountryCode))
+	if region == "" {
+		region = strings.ToUpper(strings.TrimSpace(gqlResp.Data.RefreshToken.ActiveSession.Location.CountryCode))
+	}
+	if region == "" {
+		if m := disneyCountryRe.FindSubmatch(gqlRes.Body); m != nil {
+			region = strings.ToUpper(string(m[1]))
+		}
+	}
+
+	inSup := gqlResp.Extensions.SDK.Session.InSupportedLocation
+	if inSup == nil {
+		inSup = gqlResp.Data.RefreshToken.ActiveSession.InSupportedLocation
+	}
+	var supported, hasSupported bool
+	if inSup != nil {
+		supported = *inSup
+		hasSupported = true
+	} else if m := disneyInSupRe.FindSubmatch(gqlRes.Body); m != nil {
+		supported = string(m[1]) == "true"
+		hasSupported = true
+	}
+	if !hasSupported {
+		return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "无 session 支持信息"}
+	}
+	if !supported {
+		return model.UnlockResult{Status: model.StatusFailed, Region: region, Info: "地区不支持"}
+	}
+	return model.UnlockResult{Status: model.StatusUnlock, Region: region}
+}
+
+func checkDisneyPlusLegacy(ctx context.Context, d model.Dialer) model.UnlockResult {
 	r, err := doGet(ctx, newClient(d, false), disneyPlusURL)
 	if err != nil {
 		return reqFailed("disney_plus")
@@ -157,22 +323,43 @@ func checkBilibili(ctx context.Context, d model.Dialer) model.UnlockResult {
 	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("code:%d %s", resp.Code, resp.Message)}
 }
 
-// checkTikTok 尝试获取 TikTok 视频分享页以提取 region 字段。
-// 首页对 Go HTTPS 客户端返回极小 JS 引导页（cookiejar 也无效），
-// 因此转用公开视频分享页，其 HTML 内嵌 JSON 含 region 信息。
+func parseTikTokResponse(r *httpResult) (model.UnlockResult, bool) {
+	finalLower := strings.ToLower(r.FinalURL)
+	bodyLower := strings.ToLower(string(r.Body))
+	if strings.Contains(finalLower, "/hk/notfound") || strings.Contains(bodyLower, "tiktok.com/hk/notfound") {
+		return model.UnlockResult{Status: model.StatusFailed, Region: "HK", Info: "地区限制"}, true
+	}
+	if r.StatusCode == 200 {
+		if m := tiktokRegRe.FindSubmatch(r.Body); m != nil {
+			return model.UnlockResult{Status: model.StatusUnlock, Region: strings.ToUpper(string(m[1]))}, true
+		}
+	}
+	return model.UnlockResult{}, false
+}
+
+// checkTikTok 优先请求 /explore 页面提取 region 字段并识别 /hk/notfound 封锁页；
+// 若默认 /explore 页面未命中 region，则回退探测首页 https://www.tiktok.com/。
 func checkTikTok(ctx context.Context, d model.Dialer) model.UnlockResult {
-	r, err := doGet(ctx, newClient(d, true), tiktokAPIURL)
+	c := newClient(d, true)
+	r, err := doGet(ctx, c, tiktokAPIURL)
 	if err != nil {
 		return reqFailed("tiktok")
+	}
+	if res, ok := parseTikTokResponse(r); ok {
+		return res
+	}
+	if tiktokAPIURL == defaultTikTokAPIURL || tiktokURL != defaultTikTokURL {
+		if r2, err2 := doGet(ctx, c, tiktokURL); err2 == nil {
+			if res, ok := parseTikTokResponse(r2); ok {
+				return res
+			}
+			r = r2
+		}
 	}
 	if r.StatusCode != 200 {
 		return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("HTTP %d(%db)", r.StatusCode, len(r.Body))}
 	}
-	body := string(r.Body)
-	if m := tiktokRegRe.FindStringSubmatch(body); m != nil {
-		return model.UnlockResult{Status: model.StatusUnlock, Region: strings.ToUpper(m[1])}
-	}
-	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("视频页无 region(%db)", len(r.Body))}
+	return model.UnlockResult{Status: model.StatusFailed, Info: fmt.Sprintf("页面无 region(%db)", len(r.Body))}
 }
 
 // checkDazn 通过启动接口返回的地区字段判断可访问地区。

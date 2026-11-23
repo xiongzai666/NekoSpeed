@@ -61,6 +61,14 @@ func (d *proxyDialer) SupportsUDP() bool {
 	return d.proxy.SupportUDP()
 }
 
+// Close 释放底层 mihomo proxy 持有的连接池或状态资源。
+func (d *proxyDialer) Close() error {
+	if d == nil || d.proxy == nil {
+		return nil
+	}
+	return d.proxy.Close()
+}
+
 // addrToMetadata 把 "host:port" 拆成 mihomo 的 constant.Metadata。
 // host 为 IP 时填 DstIP，否则填 Host（由代理端/系统解析）。
 func addrToMetadata(addr string, network C.NetWork) (*C.Metadata, error) {

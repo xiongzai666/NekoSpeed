@@ -1,14 +1,20 @@
 package runner
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"nekospeed/internal/geo"
 	"nekospeed/internal/model"
 	"nekospeed/internal/report"
+	"nekospeed/internal/subscription"
 )
 
 func TestFormatLocalISP(t *testing.T) {
@@ -194,4 +200,212 @@ func TestReRenderRestoresMetaAndBareStamp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "20261113_230000_media.png")); err != nil {
 		t.Fatalf("应生成裸时间戳前缀图片: %v", err)
 	}
+}
+
+type closableTestDialer struct {
+	id     string
+	closed atomic.Int32
+}
+
+func (d *closableTestDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, context.Canceled
+}
+
+func (d *closableTestDialer) Close() error {
+	d.closed.Add(1)
+	return nil
+}
+
+func TestRunUsesLoadContextWithoutMutatingGlobalProxy(t *testing.T) {
+	if err := subscription.SetProxy(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = subscription.SetProxy("") })
+
+	var proxyHits atomic.Int32
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		w.Header().Set("Content-Type", "text/yaml")
+		_, _ = w.Write([]byte("proxies:\n  - { name: 'n1', type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw }\n"))
+	}))
+	defer proxySrv.Close()
+
+	// Filter 故意不匹配，在 LoadContext 之后即刻返回“没有可用节点”，验证 LoadContext 走了 o.Proxy 且未污染全局代理
+	_, err := Run(context.Background(), Options{
+		Source:    "http://sub.invalid/runner-proxy.yaml",
+		Proxy:     proxySrv.URL,
+		Filter:    "definitely-no-match-xyz",
+		Preflight: false,
+	}, nil)
+	if err == nil {
+		t.Fatal("期望因无匹配节点返回错误")
+	}
+	if proxyHits.Load() != 1 {
+		t.Fatalf("Run 应通过 LoadContext 经代理拉取 1 次，实际 %d", proxyHits.Load())
+	}
+
+	// 全局未设置代理时，Load 同一无效域名不应再命中 proxySrv
+	if _, _, err := subscription.Load("http://sub.invalid/runner-proxy.yaml"); err == nil {
+		t.Fatal("全局代理不应被 Run 修改")
+	}
+	if proxyHits.Load() != 1 {
+		t.Fatalf("Load 不应再命中此前 Run 的每调用代理，hits=%d", proxyHits.Load())
+	}
+}
+
+func TestRunNodesDecouplesSemFromSpeedSemAndClosesDialer(t *testing.T) {
+	origDialer, origLat, origSpeed := newDialerFn, latencyTestFn, speedTestFn
+	t.Cleanup(func() {
+		newDialerFn = origDialer
+		latencyTestFn = origLat
+		speedTestFn = origSpeed
+	})
+
+	d1 := &closableTestDialer{id: "n1"}
+	d2 := &closableTestDialer{id: "n2"}
+	newDialerFn = func(n model.Node) (model.Dialer, error) {
+		if n.Name == "n1" {
+			return d1, nil
+		}
+		return d2, nil
+	}
+
+	n2Probed := make(chan struct{})
+	n1InSpeed := make(chan struct{})
+	releaseSpeed := make(chan struct{})
+	var n1SpeedOnce, n2ProbeOnce atomic.Bool
+
+	latencyTestFn = func(_ context.Context, d model.Dialer, _ string, _ int) *model.LatencyResult {
+		cd := d.(*closableTestDialer)
+		if cd.id == "n2" && n2ProbeOnce.CompareAndSwap(false, true) {
+			close(n2Probed)
+		}
+		return &model.LatencyResult{AvgHTTPS: 50, HTTPSPing: []int{50}}
+	}
+
+	var activeSpeed atomic.Int32
+	var maxActiveSpeed atomic.Int32
+	speedTestFn = func(_ context.Context, d model.Dialer, _ string, _, _ int, _ int64) *model.SpeedResult {
+		cd := d.(*closableTestDialer)
+		cur := activeSpeed.Add(1)
+		for {
+			prev := maxActiveSpeed.Load()
+			if cur <= prev || maxActiveSpeed.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		defer activeSpeed.Add(-1)
+
+		// 测速期间 dialer 不得提前关闭
+		if cd.closed.Load() != 0 {
+			t.Errorf("节点 %s 测速期间 dialer 已被关闭", cd.id)
+		}
+		if cd.id == "n1" && n1SpeedOnce.CompareAndSwap(false, true) {
+			close(n1InSpeed)
+			<-releaseSpeed
+		}
+		return &model.SpeedResult{Avg: 1000, Max: 1000, PerSecond: []float64{1000}}
+	}
+
+	doneCh := make(chan []*model.NodeResult, 1)
+	go func() {
+		nodes := []model.Node{
+			{Index: 1, Name: "n1"},
+			{Index: 2, Name: "n2"},
+		}
+		doneCh <- runNodes(context.Background(), nodes, []string{"speed"}, Options{
+			Concurrency: 1, // 故意设为 1：若未解耦 sem，n1 阻塞在 speedTestFn 时 n2 绝对无法开始延迟探测
+			Threads:     1,
+			Duration:    1,
+			PingCount:   1,
+		}, nil, nil, nil)
+	}()
+
+	select {
+	case <-n1InSpeed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待 n1 进入测速超时")
+	}
+
+	select {
+	case <-n2Probed:
+	case <-time.After(2 * time.Second):
+		close(releaseSpeed)
+		t.Fatal("Concurrency=1 时 n1 进入测速后应已释放 sem，n2 未能并发进入延迟探测")
+	}
+
+	close(releaseSpeed)
+
+	var results []*model.NodeResult
+	select {
+	case results = <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runNodes 结束超时")
+	}
+
+	if maxActiveSpeed.Load() != 1 {
+		t.Fatalf("串行测速最大并发应为 1，实际 %d", maxActiveSpeed.Load())
+	}
+	if d1.closed.Load() != 1 || d2.closed.Load() != 1 {
+		t.Fatalf("每个节点结束后 dialer.Close() 应各调用 1 次，实际 d1=%d d2=%d", d1.closed.Load(), d2.closed.Load())
+	}
+	if len(results) != 2 || results[0].Speed == nil || results[1].Speed == nil {
+		t.Fatalf("节点测速结果异常: %+v", results)
+	}
+}
+
+func TestTestNodeClosesDialerAndReleasesSemOnAllPaths(t *testing.T) {
+	origDialer, origLat, origNAT := newDialerFn, latencyTestFn, natTestFn
+	t.Cleanup(func() {
+		newDialerFn = origDialer
+		latencyTestFn = origLat
+		natTestFn = origNAT
+	})
+
+	t.Run("EarlyReturnOnPacketLoss", func(t *testing.T) {
+		d := &closableTestDialer{id: "dead"}
+		newDialerFn = func(model.Node) (model.Dialer, error) { return d, nil }
+		latencyTestFn = func(context.Context, model.Dialer, string, int) *model.LatencyResult {
+			return &model.LatencyResult{PacketLoss: 1.0, AvgHTTPS: 0}
+		}
+		res := runNodes(context.Background(), []model.Node{{Index: 1, Name: "dead"}}, []string{"speed"}, Options{Concurrency: 1}, nil, nil, nil)
+		if d.closed.Load() != 1 {
+			t.Fatalf("丢包熔断路径应关闭 dialer 1 次，实际 %d", d.closed.Load())
+		}
+		if res[0].Err == "" {
+			t.Fatal("丢包熔断应写入 Err")
+		}
+	})
+
+	t.Run("CancelWaitingSpeedSem", func(t *testing.T) {
+		d := &closableTestDialer{id: "wait-speed"}
+		newDialerFn = func(model.Node) (model.Dialer, error) { return d, nil }
+		latencyTestFn = func(context.Context, model.Dialer, string, int) *model.LatencyResult {
+			return &model.LatencyResult{AvgHTTPS: 20, HTTPSPing: []int{20}}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		speedSem := make(chan struct{}, 1)
+		speedSem <- struct{}{} // 占满 speedSem
+
+		var relCount atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			testNode(ctx, model.Node{Index: 1, Name: "wait"}, &model.NodeResult{}, []string{"speed"}, testOpts{
+				speedSem: speedSem,
+				releaseProbe: func() {
+					relCount.Add(1)
+				},
+			})
+		}()
+		time.Sleep(30 * time.Millisecond)
+		if relCount.Load() != 1 {
+			t.Fatalf("等待 speedSem 前应已释放 probe sem，relCount=%d", relCount.Load())
+		}
+		cancel()
+		<-done
+		if d.closed.Load() != 1 {
+			t.Fatalf("等待 speedSem 取消退出时应关闭 dialer 1 次，实际 %d", d.closed.Load())
+		}
+	})
 }

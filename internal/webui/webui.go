@@ -10,11 +10,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,7 +91,59 @@ func ServeWithToken(addr, token string) error {
 	}
 	openBrowser(url)
 
-	return http.Serve(ln, s.handler())
+	srv := &http.Server{
+		Handler:           s.handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.Serve(ln)
+}
+
+func outBaseDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
+	}
+	return resolveOutBaseDir(exe, flag.Lookup("test.v") != nil)
+}
+
+func resolveOutBaseDir(exe string, inTest bool) string {
+	if st, err := os.Stat("out"); err == nil && st.IsDir() {
+		return "out"
+	}
+	if inTest || isTempOrTestExe(exe) {
+		return "out"
+	}
+	if exe != "" {
+		return filepath.Join(filepath.Dir(exe), "out")
+	}
+	return "out"
+}
+
+func isTempOrTestExe(exe string) bool {
+	if exe == "" {
+		return false
+	}
+	lower := strings.ToLower(filepath.Clean(exe))
+	if strings.HasSuffix(lower, ".test.exe") || strings.HasSuffix(lower, ".test") {
+		return true
+	}
+	if strings.Contains(lower, string(filepath.Separator)+"go-build") || strings.Contains(lower, "/go-build") {
+		return true
+	}
+	tmpDir := filepath.Clean(os.TempDir())
+	if tmpDir != "" && tmpDir != "." {
+		lowerTmp := strings.ToLower(tmpDir)
+		if lower == lowerTmp || strings.HasPrefix(lower, lowerTmp+string(filepath.Separator)) {
+			return true
+		}
+		if resolvedTmp, err := filepath.EvalSymlinks(tmpDir); err == nil {
+			lowerResolved := strings.ToLower(filepath.Clean(resolvedTmp))
+			if lower == lowerResolved || strings.HasPrefix(lower, lowerResolved+string(filepath.Separator)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isLoopbackBindHost(host string) bool {
@@ -119,11 +174,8 @@ func (s *server) handler() http.Handler {
 }
 
 func (s *server) withAuth(next http.Handler) http.Handler {
-	if s.token == "" {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
+		if s.token != "" && r.URL.Path == "/" {
 			if q := strings.TrimSpace(r.URL.Query().Get("token")); subtle.ConstantTimeCompare([]byte(q), []byte(s.token)) == 1 {
 				http.SetCookie(w, &http.Cookie{
 					Name:     tokenCookieName,
@@ -137,13 +189,74 @@ func (s *server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/files/") {
-			if !s.authorized(r) {
+			if s.token != "" && !s.authorized(r) {
 				http.Error(w, "未授权：缺少或无效的访问令牌", http.StatusUnauthorized)
 				return
+			}
+			if isMutatingMethod(r.Method) {
+				if !checkSameOriginRequest(r) {
+					http.Error(w, "拒绝跨站请求", http.StatusForbidden)
+					return
+				}
+				if isJSONEndpoint(r.URL.Path) && isSimpleCORSContentType(r.Header.Get("Content-Type")) {
+					http.Error(w, "不支持的 Content-Type，请使用 application/json", http.StatusUnsupportedMediaType)
+					return
+				}
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isMutatingMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch:
+		return true
+	default:
+		return false
+	}
+}
+
+func checkSameOriginRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return false
+		}
+		if r.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	return true
+}
+
+func isJSONEndpoint(path string) bool {
+	switch path {
+	case "/api/geoip/update", "/api/preview", "/api/run", "/api/rerender":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSimpleCORSContentType(ct string) bool {
+	ct = strings.TrimSpace(ct)
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.SplitN(ct, ";", 2)[0])
+	}
+	switch strings.ToLower(mediaType) {
+	case "text/plain", "application/x-www-form-urlencoded", "multipart/form-data":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *server) authorized(r *http.Request) bool {
@@ -170,6 +283,17 @@ func (s *server) authorized(r *http.Request) bool {
 	return false
 }
 
+type historyCacheKey struct {
+	filename string
+	size     int64
+	modNano  int64
+}
+
+type historyCacheEntry struct {
+	key  historyCacheKey
+	item historyItem
+}
+
 type server struct {
 	hub   *hub
 	token string
@@ -186,6 +310,11 @@ type server struct {
 	geoDone     int
 	geoTotal    int
 	geoLastErr  string
+
+	histMu          sync.Mutex
+	histCache       map[string]historyCacheEntry
+	histCacheHits   int
+	histCacheMisses int
 }
 
 // runRequest 是 POST /api/run 的请求体（runner.Options 的子集 + 上传内容支持）。
@@ -467,7 +596,7 @@ func materializeInlineSource(source, content, filename string) (string, string, 
 	if content == "" {
 		return strings.TrimSpace(source), "", nil
 	}
-	uploadDir := filepath.Join("out", "uploads")
+	uploadDir := filepath.Join(outBaseDir(), "uploads")
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("创建上传目录失败: %w", err)
 	}
@@ -561,11 +690,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请先填写订阅链接或上传/粘贴节点配置", http.StatusBadRequest)
 		return
 	}
-	if err := subscription.SetProxy(req.Proxy); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	nodes, subName, err := subscription.Load(source)
+	nodes, subName, err := subscription.LoadContext(r.Context(), source, req.Proxy)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("解析订阅失败: %v", err), http.StatusBadRequest)
 		return
@@ -644,6 +769,12 @@ func (s *server) handleReRender(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	s.mu.Lock()
+	active := s.running
+	activeRunID := s.runID
+	activeOutDir := s.outDir
+	s.mu.Unlock()
+
 	var targetDir string
 	runID := strings.TrimSpace(req.RunID)
 	if runID != "" {
@@ -651,12 +782,14 @@ func (s *server) handleReRender(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "非法记录标识", http.StatusBadRequest)
 			return
 		}
-		targetDir = filepath.Join("out", "web", runID)
+		targetDir = filepath.Join(outBaseDir(), "web", runID)
 	} else {
-		s.mu.Lock()
-		targetDir = s.outDir
-		runID = s.runID
-		s.mu.Unlock()
+		targetDir = activeOutDir
+		runID = activeRunID
+	}
+	if active && runID == activeRunID {
+		http.Error(w, "测速任务运行中，请等待完成后再重绘", http.StatusConflict)
+		return
 	}
 	if targetDir == "" {
 		http.Error(w, "未指定有效的测速记录目录", http.StatusBadRequest)
@@ -673,6 +806,7 @@ func (s *server) handleReRender(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("重绘失败: %v", err), http.StatusInternalServerError)
 		return
 	}
+	s.invalidateHistoryCache(runID)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -745,7 +879,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	runID := now.Format("20060102_150405")
-	outDir := filepath.Join("out", "web", runID)
+	outDir := filepath.Join(outBaseDir(), "web", runID)
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.runID = runID
@@ -813,8 +947,20 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 				evt.Files = append(evt.Files, filepath.Base(f))
 			}
 		}
+		s.invalidateHistoryCache(runID)
 		s.hub.done(evt)
 	}()
+}
+
+func (s *server) invalidateHistoryCache(runID string) {
+	if runID == "" {
+		return
+	}
+	s.histMu.Lock()
+	if s.histCache != nil {
+		delete(s.histCache, runID)
+	}
+	s.histMu.Unlock()
 }
 
 func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
@@ -833,7 +979,7 @@ func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	baseDir := filepath.Join("out", "web")
+	baseDir := filepath.Join(outBaseDir(), "web")
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -844,17 +990,20 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return entries[i].Name() > entries[j].Name()
 	})
 	var items []historyItem
+	seenRuns := make(map[string]struct{}, 50)
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		runDir := filepath.Join(baseDir, e.Name())
+		runID := e.Name()
+		runDir := filepath.Join(baseDir, runID)
 		subEntries, err := os.ReadDir(runDir)
 		if err != nil {
 			continue
 		}
 		var files []string
 		var jsonFile string
+		var jsonEntry fs.DirEntry
 		var subPrefix string
 		for _, f := range subEntries {
 			if f.IsDir() {
@@ -865,6 +1014,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 				files = append(files, fn)
 				if jsonFile == "" && strings.HasSuffix(fn, "_result.json") {
 					jsonFile = fn
+					jsonEntry = f
 					subPrefix = strings.TrimSuffix(fn, "_result.json")
 				}
 			}
@@ -872,56 +1022,107 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if len(files) == 0 {
 			continue
 		}
-		subName := ""
-		if m := stampSuffixRe.FindStringIndex(subPrefix); m != nil {
-			subName = subPrefix[:m[0]]
-		} else if !inlineNamePrefixRe.MatchString(subPrefix) {
-			subName = subPrefix
-		}
-		var total, succeeded int
-		var elapsed string
-		if jsonFile != "" {
-			if raw, err := os.ReadFile(filepath.Join(runDir, jsonFile)); err == nil {
-				var summary struct {
-					SubName   string `json:"subName"`
-					Total     int    `json:"total"`
-					Succeeded int    `json:"succeeded"`
-					Elapsed   string `json:"elapsed"`
+		seenRuns[runID] = struct{}{}
+
+		var item historyItem
+		var cacheHit bool
+		var cacheKey historyCacheKey
+		var hasKey bool
+
+		if jsonFile != "" && jsonEntry != nil {
+			if info, infoErr := jsonEntry.Info(); infoErr == nil {
+				cacheKey = historyCacheKey{
+					filename: jsonFile,
+					size:     info.Size(),
+					modNano:  info.ModTime().UnixNano(),
 				}
-				if json.Unmarshal(raw, &summary) == nil {
-					if summary.SubName != "" {
-						subName = summary.SubName
+				hasKey = true
+				s.histMu.Lock()
+				if s.histCache != nil {
+					if cached, ok := s.histCache[runID]; ok && cached.key == cacheKey {
+						item = cached.item
+						s.histCacheHits++
+						cacheHit = true
 					}
-					total = summary.Total
-					succeeded = summary.Succeeded
-					elapsed = summary.Elapsed
+				}
+				s.histMu.Unlock()
+			}
+		}
+
+		if !cacheHit {
+			subName := ""
+			if m := stampSuffixRe.FindStringIndex(subPrefix); m != nil {
+				subName = subPrefix[:m[0]]
+			} else if !inlineNamePrefixRe.MatchString(subPrefix) {
+				subName = subPrefix
+			}
+			var total, succeeded int
+			var elapsed string
+			if jsonFile != "" {
+				if raw, err := os.ReadFile(filepath.Join(runDir, jsonFile)); err == nil {
+					var summary struct {
+						SubName   string `json:"subName"`
+						Total     int    `json:"total"`
+						Succeeded int    `json:"succeeded"`
+						Elapsed   string `json:"elapsed"`
+					}
+					if json.Unmarshal(raw, &summary) == nil {
+						if summary.SubName != "" {
+							subName = summary.SubName
+						}
+						total = summary.Total
+						succeeded = summary.Succeeded
+						elapsed = summary.Elapsed
+					}
 				}
 			}
-		}
-		title := e.Name()
-		if subName != "" {
-			title = e.Name() + " · " + subName
-		}
-		if total > 0 {
-			if elapsed != "" {
-				title = fmt.Sprintf("%s (%d/%d · %s)", title, succeeded, total, elapsed)
-			} else {
-				title = fmt.Sprintf("%s (%d/%d)", title, succeeded, total)
+			title := runID
+			if subName != "" {
+				title = runID + " · " + subName
+			}
+			if total > 0 {
+				if elapsed != "" {
+					title = fmt.Sprintf("%s (%d/%d · %s)", title, succeeded, total, elapsed)
+				} else {
+					title = fmt.Sprintf("%s (%d/%d)", title, succeeded, total)
+				}
+			}
+			item = historyItem{
+				ID:        runID,
+				Title:     title,
+				SubName:   subName,
+				Total:     total,
+				Succeeded: succeeded,
+				Elapsed:   elapsed,
+			}
+			if hasKey {
+				s.histMu.Lock()
+				if s.histCache == nil {
+					s.histCache = make(map[string]historyCacheEntry)
+				}
+				s.histCacheMisses++
+				s.histCache[runID] = historyCacheEntry{key: cacheKey, item: item}
+				s.histMu.Unlock()
 			}
 		}
-		items = append(items, historyItem{
-			ID:        e.Name(),
-			Title:     title,
-			SubName:   subName,
-			Total:     total,
-			Succeeded: succeeded,
-			Elapsed:   elapsed,
-			Files:     files,
-		})
+
+		item.Files = files
+		items = append(items, item)
 		if len(items) >= 50 {
 			break
 		}
 	}
+
+	s.histMu.Lock()
+	if len(s.histCache) > 128 {
+		for k := range s.histCache {
+			if _, ok := seenRuns[k]; !ok {
+				delete(s.histCache, k)
+			}
+		}
+	}
+	s.histMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(items)
 }
@@ -939,11 +1140,12 @@ func (s *server) handleDeleteHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "不能删除正在运行的记录", http.StatusConflict)
 		return
 	}
-	target := filepath.Join("out", "web", run)
+	target := filepath.Join(outBaseDir(), "web", run)
 	if err := os.RemoveAll(target); err != nil {
 		http.Error(w, fmt.Sprintf("删除失败: %v", err), http.StatusInternalServerError)
 		return
 	}
+	s.invalidateHistoryCache(run)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": run})
 }
@@ -999,7 +1201,7 @@ func (s *server) handleHistoryFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "非法路径参数", http.StatusBadRequest)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join("out", "web", run, name))
+	http.ServeFile(w, r, filepath.Join(outBaseDir(), "web", run, name))
 }
 
 func isSafeFilename(s string) bool {
