@@ -46,7 +46,8 @@
 
 针对上述案例及常见生产环境问题，仓库当前已内置五项防护：
 
-1. **多公共 DNS 采样 + TCP 预检锁定活 IP（`internal/nodepool/preflight.go`）**
+1. **多公共 DNS 采样 + TCP 预检锁定活 IP（`internal/nodepool/preflight.go` & `internal/runner/runner.go`）**
+   - 每次测速前调用 `ResetHosts()` 清空全局 `DefaultHosts`，避免 Web UI 常驻进程跨任务残留旧 IP 映射。
    - 测试前并发向阿里（`223.5.5.5`）、腾讯（`119.29.29.29`）、114、Cloudflare、Google 等公共 DNS 解析节点域名，对候选 IP 池逐一执行 TCP 握手探活，自动钉住首个可达的真实 IP。
    - 自动识别并剔除 `198.18.0.0/15`（Fake-IP 段）、回环与链路本地地址。
 2. **物理网卡自动绑定绕过本地 TUN（`internal/nodepool/netbind.go`）**
@@ -57,5 +58,6 @@
 4. **多源 GeoIP 精度、GBK 兼容、ASN 补全与源冷却（`internal/geo/geoip.go`）**
    - 本机公网归属先经太平洋电脑网（GBK 自动转码）获取公网 IPv4，再传给纯真 CZ88（带区县精度并过滤 `"市辖区"`）与百度大数据（省市拆分），解决空参数调纯真/百度固定失败及 GBK 乱码问题。
    - 为直连 GeoIP 源引入 3 分钟失败冷却（区分网络/限额异常与“非中国大陆”正常拒绝），并在国内库缺少数字 `ASN` 或精简 `-mmdb` 缺字段时短超时在线补全；代理出口先走 Cloudflare Trace 锁定真实落地与机房码，再以 `5s` 单步 / `20s` 总预算容灾回退。
-5. **完整支持 `anytls://` 分享链接与规范渲染（`internal/subscription/sharelink.go` & `internal/render/render.go`）**
+5. **完整支持 `anytls://` 与 Clash `hosts:` 映射展开（`internal/subscription/sharelink.go`、`clash.go`、`subscription.go` & `internal/render/render.go`）**
    - 直接解析 `anytls://` 链接中的密码、SNI、ALPN、`insecure`/`skip-cert-verify` 参数，并在报告图中显示为 `AnyTLS`。
+   - 解析 Clash 顶层 `hosts:` 的精确/通配符/链式域名映射并保留原始默认 SNI，避免“假兼容”；在本机开启 TUN 且未指定 `-proxy`/环境代理下若拉取订阅遇 `403`，自动回退至绑定物理网卡直连重试。

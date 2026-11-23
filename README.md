@@ -148,7 +148,7 @@ go build -o nekospeed ./cmd/nekospeed
 
 ### 支持的订阅格式
 
-- **Clash / Mihomo YAML**：标准 `proxies:` 节点列表，支持 `mihomo` 全系协议。
+- **Clash / Mihomo YAML**：标准 `proxies:` 节点列表，支持 `mihomo` 全系协议，并自动展开顶层 `hosts:` 域名/IP 映射（兼容精确匹配、`*.`、`+.`/`.` 通配符及链式跳转，同时为未显式设置 SNI 的 TLS 节点保留原域名作默认 SNI）。
 - **分享链接订阅（Base64 编码或纯文本逐行）**：`ss://`、`ssr://`、`vmess://`、`vless://`、`trojan://`、`hysteria://` / `hy://`、`hysteria2://` / `hy2://`、`tuic://`、`anytls://`、`snell://`。
 
 ---
@@ -177,8 +177,8 @@ go build -o nekospeed ./cmd/nekospeed
 
 针对国内网络环境与本地代理干扰，程序在运行时默认启用以下防护（排查思路与真实案例详见 [问题排查与防护机制](docs/troubleshooting.md)）：
 
-1. **物理网卡自动绑定（防 TUN 套代理）**：自动扫描系统默认路由对应的物理网卡（过滤 `Mihomo`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟接口），通过 `dialer.DefaultInterface` 直绑物理网卡发送测速与预检流量。
-2. **多公共 DNS + TCP 预检**：并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 `198.18.0.0/15` Fake-IP 并对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
+1. **物理网卡自动绑定（防 TUN 套代理）**：自动扫描系统默认路由对应的物理网卡（过滤 `Mihomo`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟接口），通过 `dialer.DefaultInterface` 直绑物理网卡发送测速与预检流量；当本机开启 TUN 且未显式指定 `-proxy`/环境变量代理、拉取订阅遇到 `403` 时，也会自动切换至物理网卡直连重试。
+2. **多公共 DNS + TCP 预检**：每次测试前先清空全局 `DefaultHosts` 防止 Web UI 跨任务残留，随后并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 `198.18.0.0/15` Fake-IP 并对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
 3. **高精度本地与节点 GeoIP 链**：
    - **本机网络归属**：优先由太平洋电脑网（自适应 GBK 转码）取得公网 IPv4，再传给纯真 CZ88（精确到区县级并过滤 `"市辖区"`）或百度大数据（省市拆分）解析中文简称（如 `安庆桐城移动`）。
    - **节点入口 / 出口**：直连数据源内置 3 分钟失败冷却防止不可达或限额接口逐节点空等超时；国内库缺失数字 ASN 时自动以 2 秒短超时从 `ip-api.com` / `api.ip.sb` 补全；代理出口优先通过 Cloudflare Trace 测定真实落地 IP 与机房三字码，`-mmdb` 缺少城市或 ASN 时自动在线补全。
