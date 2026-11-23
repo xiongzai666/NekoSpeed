@@ -179,9 +179,9 @@ go build -o nekospeed ./cmd/nekospeed
 
 1. **物理网卡自动绑定（防 TUN 套代理）**：自动扫描系统默认路由对应的物理网卡（过滤 `Mihomo`、`Clash`、`utun`、`wintun`、`sing-box`、`tailscale` 等虚拟接口），通过 `dialer.DefaultInterface` 直绑物理网卡发送测速与预检流量；当本机开启 TUN 且未显式指定 `-proxy`/环境变量代理、拉取订阅遇到 `403` 时，也会自动切换至物理网卡直连重试。
 2. **多公共 DNS + TCP 预检**：每次测试前先清空全局 `DefaultHosts` 防止 Web UI 跨任务残留，随后并发查询阿里、腾讯、114、Cloudflare、Google DNS，剔除 `198.18.0.0/15` Fake-IP 并对候选 IP 做 TCP 握手探活，规避 DDNS 轮换池中的不可达 IP。
-3. **高精度本地与节点 GeoIP 链**：
-   - **本机网络归属**：优先由太平洋电脑网（自适应 GBK 转码）取得公网 IPv4，再传给纯真 CZ88（精确到区县级并过滤 `"市辖区"`）或百度大数据（省市拆分）解析中文简称（如 `安庆桐城移动`）。
-   - **节点入口 / 出口**：直连数据源内置 3 分钟失败冷却防止不可达或限额接口逐节点空等超时；国内库缺失数字 ASN 时自动以 2 秒短超时从 `ip-api.com` / `api.ip.sb` 补全；代理出口优先通过 Cloudflare Trace 测定真实落地 IP 与机房三字码，`-mmdb` 缺少城市或 ASN 时自动在线补全。
+3. **多源与离线分层 GeoIP 引擎**：
+   - **离线多库自动加速**：程序自动探测 `geoip/` 目录（可用 `NEKOSPEED_GEOIP_DIR` 覆盖）下的 `GeoCN.mmdb`（国内双栈省市区县+运营商）、`ipinfo_lite.mmdb`（日更全球国家+ASN，若缺失则自动回退 `GeoLite2-ASN.mmdb`）与 `GeoLite2-City.mmdb`（全球城市中文名）。可在 Web UI 顶栏或高级参数中点击**「更新 IP 库」**一键下载校验，优先拉取本仓 `geoip-latest` Release 并自动回退至上游公开镜像；如本机配置了 `NEKOSPEED_IPINFO_TOKEN`，亦可直连 IPinfo 官方下载 `ipinfo_lite.mmdb`。
+   - **在线容灾与物理落地校准**：本地未安装离线库时，优先走国际源（`ip-api.com` → `api.ip.sb` → `ipwho.is` → `get.geojs.io`），仅对判定为中国大陆（`CN`）或本机公网 IP 再触发国内高精接口（纯真 CZ88 → Mir6 → 百度大数据 → 太平洋电脑网），避免海外 IP 浪费国内额度与多余 RTT，并保留 24 小时进程级缓存与 3 分钟故障冷却；代理出口优先通过 Cloudflare Trace 实测真实落地 IP 与机房三字码。
 4. **100% 丢包快速熔断**：延迟探测全部失败时记录真实底层错误并跳过后续测速、解锁与拓扑探测，避免无效等待和“全 0 假成功”。
 
 ---
@@ -215,6 +215,8 @@ cd android
    - 查询 `MetaCubeX/mihomo` 最新正式版 Tag 并更新依赖，运行全量单测与 6 平台交叉编译后自动发布至 Releases；若同 UTC 日期已有同名 Tag，自动追加短提交号（如 `v2026.11.13-v1.19.34-<sha>`）避免冲突。
 2. **[CI & Tag Release](.github/workflows/ci-release.yml)**：
    - 监听 `main` 分支推送、PR、手动触发与 `v*` 标签推送，执行全量单元测试并在打标签或手动发布时构建多平台压缩包与 `SHA256SUMS.txt`。
+3. **[Update GeoIP Databases](.github/workflows/update-geoip.yml)**：
+   - 每日 UTC `03:00`（北京时间 `11:00`）定时拉取 `GeoCN.mmdb`、`GeoLite2-City.mmdb`、`GeoLite2-ASN.mmdb`；若仓库 Secrets 中配置了 `IPINFO_TOKEN`（推荐免费申请，切勿写入代码），同步拉取日更 `ipinfo_lite.mmdb`，校验后发布至固定 Release 标签 `geoip-latest`（`make_latest: false`，不干扰软件版本发布）。
 
 ---
 
@@ -257,6 +259,6 @@ NekoSpeed/
 | `golang.org/x/image`、`golang.org/x/text`、`github.com/miekg/dns` | BSD-3-Clause；图像渲染、GBK 转码与多源 DNS 解析 |
 | `gopkg.in/yaml.v3`、`github.com/pion/stun`、`github.com/oschwald/maxminddb-golang` | MIT；YAML 配置、STUN NAT 探测与 MMDB 读取 |
 | Android 端（Compose / Navigation / Coil / Coroutines 等） | Apache-2.0 |
-| GeoIP 数据库与在线接口 | 使用 `GeoLite2` mmdb 需遵循 MaxMind CC BY-SA 4.0 署名要求；未提供 mmdb 时默认请求纯真 CZ88、百度大数据、太平洋电脑网、Cloudflare Trace、`ip-api.com`、`api.ip.sb`、`ipwho.is`、`ipinfo.io` 等公开服务，请注意各自非商业/限频条款 |
+| GeoIP 数据库与在线接口 | 离线库支持 `GeoCN.mmdb`（[ljxi/GeoCN](https://github.com/ljxi/GeoCN)）、`ipinfo_lite.mmdb`（IP address data powered by [IPinfo](https://ipinfo.io), **CC BY-SA 4.0**）与 `GeoLite2-City.mmdb` / `GeoLite2-ASN.mmdb`（MaxMind GeoLite2, **CC BY-SA 4.0**，镜像来自 [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb)）；可通过环境变量 `NEKOSPEED_GEOIP_DIR` 自定义库目录、`NEKOSPEED_IPINFO_TOKEN` 配置本地直下 Token（GitHub Actions 自动发布请在仓库 Secrets 中设置 `IPINFO_TOKEN`）。未配置离线库时在线兜底使用 `ip-api.com`、`api.ip.sb`、`ipwho.is`、`get.geojs.io`、Cloudflare Trace、纯真 CZ88、Mir6、百度大数据、太平洋电脑网、Bilibili 接口 |
 
 **免责声明**：本项目仅用于网络质量测试与学习研究，请遵守当地法律法规与服务商条款；测速及解锁结果受本地网络、节点负载与第三方平台策略变更影响，仅供参考。

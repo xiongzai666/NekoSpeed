@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -385,6 +387,11 @@ func TestResolveOutboundCFTraceSkipsDomesticAndCachesMeta(t *testing.T) {
 	}))
 	t.Cleanup(domesticSrv.Close)
 
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(failSrv.Close)
+
 	cfSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ip=198.51.100.42\nloc=JP\ncolo=NRT\n")
 	}))
@@ -396,12 +403,15 @@ func TestResolveOutboundCFTraceSkipsDomesticAndCachesMeta(t *testing.T) {
 	}))
 	t.Cleanup(whoisSrv.Close)
 
-	oldCZ, oldBD, oldPC, oldCF, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, cfTraceURL, ipwhoisBaseURL
-	cz88BaseURL, baiduBaseURL, pconlineBaseURL = domesticSrv.URL, domesticSrv.URL, domesticSrv.URL
+	oldCZ, oldBD, oldPC, oldMir6, oldCF, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, cfTraceURL, ipwhoisBaseURL
+	oldAPI, oldIPSB, oldGeoJS := ipAPIBaseURL, ipsbBaseURL, geojsBaseURL
+	cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = domesticSrv.URL, domesticSrv.URL, domesticSrv.URL, domesticSrv.URL
 	cfTraceURL, ipwhoisBaseURL = cfSrv.URL, whoisSrv.URL
+	ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = failSrv.URL, failSrv.URL, failSrv.URL
 	t.Cleanup(func() {
-		cz88BaseURL, baiduBaseURL, pconlineBaseURL = oldCZ, oldBD, oldPC
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL = oldCZ, oldBD, oldPC, oldMir6
 		cfTraceURL, ipwhoisBaseURL = oldCF, oldWhois
+		ipAPIBaseURL, ipsbBaseURL, geojsBaseURL = oldAPI, oldIPSB, oldGeoJS
 	})
 
 	r, err := NewResolver("")
@@ -554,5 +564,251 @@ func TestGeoCooldownDistrictSplitAndASNFill(t *testing.T) {
 	)
 	if merged.Country != "CN" || merged.City != "安庆桐城" || merged.ASN != "AS9808" || merged.ISP != "中国移动" {
 		t.Errorf("mergeGeoMissing = %+v", merged)
+	}
+}
+
+func TestLookupIPv6SkipsIPv4OnlyDomesticAndRejectsMismatch(t *testing.T) {
+	var baiduHits, pcHits atomic.Int32
+
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(failSrv.Close)
+
+	czSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":5101,"success":false,"message":"今日免登录查询次数已用完，请登录查询更多","data":null}`)
+	}))
+	t.Cleanup(czSrv.Close)
+
+	baiduSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		baiduHits.Add(1)
+		fmt.Fprint(w, `{"status":"0","data":[{"location":"安徽省安庆市 移动","origip":"120.242.231.100"}]}`)
+	}))
+	t.Cleanup(baiduSrv.Close)
+
+	pcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pcHits.Add(1)
+		fmt.Fprint(w, `{"ip":"120.242.231.100","pro":"安徽省","city":"安庆市","addr":"安徽省安庆市 移通"}`)
+	}))
+	t.Cleanup(pcSrv.Close)
+
+	whoisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ip":"2602:fa4f:b00:50e7:3aed:dfa3:a813:5830","success":true,"country_code":"JP","region":"Tokyo","city":"Tokyo","connection":{"asn":61112,"org":"AkileCloud LLC","isp":"AkileCloud LLC"}}`)
+	}))
+	t.Cleanup(whoisSrv.Close)
+
+	oldCZ, oldBD, oldPC, oldWhois := cz88BaseURL, baiduBaseURL, pconlineBaseURL, ipwhoisBaseURL
+	oldAPI, oldIPSB, oldGeoJS, oldMir6 := ipAPIBaseURL, ipsbBaseURL, geojsBaseURL, mir6BaseURL
+	cz88BaseURL, baiduBaseURL, pconlineBaseURL, ipwhoisBaseURL = czSrv.URL, baiduSrv.URL, pcSrv.URL, whoisSrv.URL
+	ipAPIBaseURL, ipsbBaseURL, geojsBaseURL, mir6BaseURL = failSrv.URL, failSrv.URL, failSrv.URL, failSrv.URL
+	t.Cleanup(func() {
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL, ipwhoisBaseURL = oldCZ, oldBD, oldPC, oldWhois
+		ipAPIBaseURL, ipsbBaseURL, geojsBaseURL, mir6BaseURL = oldAPI, oldIPSB, oldGeoJS, oldMir6
+	})
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	ctx := context.Background()
+	targetV6 := "2602:fa4f:B00:50e7:3aed:dfa3:a813:5830"
+	g := r.Lookup(ctx, targetV6, nil)
+	if g.Stack != "6" || g.Country != "JP" || g.ASN != "AS61112" || !sameIP(g.IP, targetV6) || g.IP == "120.242.231.100" {
+		t.Fatalf("IPv6 Lookup 结果异常: %+v", g)
+	}
+	if baiduHits.Load() != 0 || pcHits.Load() != 0 {
+		t.Fatalf("IPv6 查询不应请求仅支持 IPv4 的国内接口: baidu=%d, pconline=%d", baiduHits.Load(), pcHits.Load())
+	}
+
+	if _, err := r.lookupPCOnline(ctx, targetV6, nil); err == nil || isTransientSourceErr(err) {
+		t.Fatalf("lookupPCOnline(IPv6) 应拒绝且不触发冷却, got err=%v", err)
+	}
+	if _, err := r.lookupBaidu(ctx, targetV6, nil); err == nil || isTransientSourceErr(err) {
+		t.Fatalf("lookupBaidu(IPv6) 应拒绝且不触发冷却, got err=%v", err)
+	}
+	if baiduHits.Load() != 0 || pcHits.Load() != 0 {
+		t.Fatalf("IPv6 快速拒绝不应发 HTTP 请求: baidu=%d, pconline=%d", baiduHits.Load(), pcHits.Load())
+	}
+
+	if _, err := r.lookupPCOnline(ctx, "8.8.8.8", nil); err == nil || isTransientSourceErr(err) {
+		t.Fatalf("lookupPCOnline 返回不匹配 IP 时应报错且不触发冷却, got err=%v", err)
+	}
+}
+
+func TestDecodeCNDivisionAndNormalizeISP(t *testing.T) {
+	cases := []struct {
+		code       uint32
+		wantRegion string
+		wantCity   string
+	}{
+		{340881, "安徽省", "安庆桐城"},
+		{110108, "北京市", "北京海淀区"},
+		{440309, "广东省", "深圳龙华区"},
+	}
+	for _, tc := range cases {
+		reg, city := decodeCNDivision(tc.code)
+		if reg != tc.wantRegion || city != tc.wantCity {
+			t.Errorf("decodeCNDivision(%d) = (%q, %q), 期望 (%q, %q)", tc.code, reg, city, tc.wantRegion, tc.wantCity)
+		}
+	}
+	for in, want := range map[string]string{
+		"移动":  "中国移动",
+		"电信":  "中国电信",
+		"联通":  "中国联通",
+		"广电":  "中国广电",
+		"教育网": "中国教育网",
+	} {
+		if got := normalizeCNISP(in); got != want {
+			t.Errorf("normalizeCNISP(%q) = %q, 期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestOnlineLookupPrefersInternationalForOverseasAndRefinesCN(t *testing.T) {
+	var domesticHits atomic.Int32
+
+	domesticSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		domesticHits.Add(1)
+		http.Error(w, "unexpected domestic call", http.StatusInternalServerError)
+	}))
+	t.Cleanup(domesticSrv.Close)
+
+	czSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.URL.Query().Get("ip")
+		if ip == "203.0.113.99" {
+			fmt.Fprint(w, `{"code":200,"success":true,"data":{"ip":"203.0.113.99","countryCode":"US","country":"美国","province":"加利福尼亚州","city":"洛杉矶","districts":"未知","isp":"IT7","asn":"AS25820"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"code":200,"success":true,"data":{"ip":"120.242.231.100","countryCode":"CN","country":"中国","province":"安徽省","city":"安庆市","districts":"桐城市","isp":"中国移动","asn":"CHINAMOBILE-CN"}}`)
+	}))
+	t.Cleanup(czSrv.Close)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := strings.TrimPrefix(r.URL.Path, "/json/")
+		if ip == "120.242.231.100" {
+			fmt.Fprint(w, `{"status":"success","countryCode":"CN","regionName":"广东","city":"广州市","query":"120.242.231.100","as":"AS9808 China Mobile","org":"China Mobile","isp":"China Mobile"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"status":"success","countryCode":"US","regionName":"California","city":"Los Angeles","query":%q,"as":"AS13335 Cloudflare Inc","org":"Cloudflare","isp":"Cloudflare"}`, ip)
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	oldCZ, oldBD, oldPC, oldMir6, oldAPI := cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, ipAPIBaseURL
+	cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, ipAPIBaseURL = domesticSrv.URL, domesticSrv.URL, domesticSrv.URL, domesticSrv.URL, apiSrv.URL
+	t.Cleanup(func() {
+		cz88BaseURL, baiduBaseURL, pconlineBaseURL, mir6BaseURL, ipAPIBaseURL = oldCZ, oldBD, oldPC, oldMir6, oldAPI
+	})
+
+	r, err := NewResolver("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	ctx := context.Background()
+	// 1. 海外 IP 仅走国际源，不触发任何国内接口
+	gUS := r.Lookup(ctx, "1.2.3.4", nil)
+	if gUS.Country != "US" || gUS.ASN != "AS13335" {
+		t.Fatalf("海外 IP 结果异常: %+v", gUS)
+	}
+	if domesticHits.Load() != 0 {
+		t.Fatalf("海外 IP 不应触发国内接口, 实际调用 %d 次", domesticHits.Load())
+	}
+
+	// 2. CN IP 先由国际源判定为 CN + 拿 ASN，再由国内高精源补全区县与运营商
+	cz88BaseURL = czSrv.URL
+	gCN := r.Lookup(ctx, "120.242.231.100", nil)
+	if gCN.Country != "CN" || gCN.Region != "安徽省" || gCN.City != "安庆桐城" || gCN.ISP != "中国移动" || gCN.ASN != "AS9808" || gCN.Org != "China Mobile" {
+		t.Fatalf("CN IP 融合结果异常: %+v", gCN)
+	}
+
+	// 3. CZ88 返回 "未知" 区县应被自动过滤
+	gUnknown, err := r.lookupCZ88(ctx, "203.0.113.99", nil)
+	if err != nil || gUnknown.City != "洛杉矶" {
+		t.Fatalf("CZ88 '未知' 过滤异常: g=%+v err=%v", gUnknown, err)
+	}
+}
+
+// minimalTestMMDB 构造一个可通过 maxminddb.Open 校验的最小合法 MMDB 字节序列。
+func minimalTestMMDB() []byte {
+	var buf []byte
+	// 1 node * 24-bit record = 6 zero bytes + 16 zero separator bytes
+	buf = append(buf, make([]byte, 22)...)
+	buf = append(buf, []byte("\xab\xcd\xefMaxMind.com")...)
+	appendStr := func(s string) {
+		buf = append(buf, byte(0x40|len(s)))
+		buf = append(buf, []byte(s)...)
+	}
+	buf = append(buf, 0xe5) // Map with 5 keys
+	appendStr("node_count")
+	buf = append(buf, 0xc1, 0x01) // uint32(1)
+	appendStr("record_size")
+	buf = append(buf, 0xa1, 24) // uint16(24)
+	appendStr("ip_version")
+	buf = append(buf, 0xa1, 6) // uint16(6)
+	appendStr("binary_format_major_version")
+	buf = append(buf, 0xa1, 2) // uint16(2)
+	appendStr("binary_format_minor_version")
+	buf = append(buf, 0xa0) // uint16(0)
+	return buf
+}
+
+func TestUpdateDBsFallbackAndValidation(t *testing.T) {
+	validMMDB := minimalTestMMDB()
+
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(relSrv.Close)
+
+	upSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "corrupt") {
+			fmt.Fprint(w, "<html>not a mmdb</html>")
+			return
+		}
+		_, _ = w.Write(validMMDB)
+	}))
+	t.Cleanup(upSrv.Close)
+
+	oldRel, oldCN, oldCity, oldASN, oldIPinfo := GeoIPReleaseBaseURL, GeoCNUpstreamURL, GeoLiteCityUpstreamURL, GeoLiteASNUpstreamURL, IPinfoLiteDownloadBaseURL
+	GeoIPReleaseBaseURL = relSrv.URL
+	GeoCNUpstreamURL = upSrv.URL + "/GeoCN.mmdb"
+	GeoLiteCityUpstreamURL = upSrv.URL + "/GeoLite2-City.mmdb"
+	GeoLiteASNUpstreamURL = upSrv.URL + "/GeoLite2-ASN.mmdb"
+	IPinfoLiteDownloadBaseURL = upSrv.URL + "/corrupt/ipinfo_lite.mmdb"
+	t.Cleanup(func() {
+		GeoIPReleaseBaseURL, GeoCNUpstreamURL, GeoLiteCityUpstreamURL, GeoLiteASNUpstreamURL, IPinfoLiteDownloadBaseURL = oldRel, oldCN, oldCity, oldASN, oldIPinfo
+	})
+
+	dir := t.TempDir()
+	res, err := UpdateDBs(context.Background(), UpdateOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("UpdateDBs 失败: %v", err)
+	}
+	if !res.Status.FullReady || res.Status.Mode != "offline" {
+		t.Fatalf("UpdateDBs 后状态异常: %+v", res.Status)
+	}
+	for _, name := range []string{geoCNFileName, geoLiteASNFileName, geoLiteCityName} {
+		if _, statErr := os.Stat(filepath.Join(dir, name)); statErr != nil {
+			t.Errorf("期望写入 %s: %v", name, statErr)
+		}
+	}
+
+	// 验证无效 HTML 响应不会覆盖已有的合法 MMDB，且错误中绝不泄露 Token
+	GeoCNUpstreamURL = upSrv.URL + "/corrupt/GeoCN.mmdb"
+	GeoLiteCityUpstreamURL = upSrv.URL + "/corrupt/GeoLite2-City.mmdb"
+	GeoLiteASNUpstreamURL = upSrv.URL + "/corrupt/GeoLite2-ASN.mmdb"
+	secret := "secret-tok-xyz"
+	_, errFail := UpdateDBs(context.Background(), UpdateOptions{Dir: dir, IPinfoToken: secret})
+	if errFail == nil {
+		t.Fatal("所有源均返回损坏数据时应报错")
+	}
+	if strings.Contains(errFail.Error(), secret) {
+		t.Fatalf("错误消息中不得包含 Token: %v", errFail)
+	}
+	if b, readErr := os.ReadFile(filepath.Join(dir, geoCNFileName)); readErr != nil || len(b) != len(validMMDB) {
+		t.Fatalf("损坏响应不得覆盖原有合法 %s", geoCNFileName)
 	}
 }

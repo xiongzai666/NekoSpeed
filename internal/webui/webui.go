@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"nekospeed/internal/geo"
 	"nekospeed/internal/model"
 	"nekospeed/internal/nodepool"
 	"nekospeed/internal/render"
@@ -102,6 +104,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /static/", s.handleStatic)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("GET /api/geoip/status", s.handleGeoIPStatus)
+	mux.HandleFunc("POST /api/geoip/update", s.handleGeoIPUpdate)
 	mux.HandleFunc("POST /api/preview", s.handlePreview)
 	mux.HandleFunc("POST /api/run", s.handleRun)
 	mux.HandleFunc("POST /api/rerender", s.handleReRender)
@@ -176,6 +180,12 @@ type server struct {
 	runID     string
 	startedAt time.Time
 	outDir    string // 最近一次任务的输出目录
+
+	geoUpdating bool
+	geoStage    string
+	geoDone     int
+	geoTotal    int
+	geoLastErr  string
 }
 
 // runRequest 是 POST /api/run 的请求体（runner.Options 的子集 + 上传内容支持）。
@@ -306,6 +316,32 @@ func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.StripPrefix("/static/", http.FileServerFS(sub)).ServeHTTP(w, r)
 }
 
+func (s *server) geoipStatusPayload() map[string]any {
+	st := geo.GetDBStatus("")
+	s.mu.Lock()
+	updating := s.geoUpdating
+	stage := s.geoStage
+	done := s.geoDone
+	total := s.geoTotal
+	lastErr := s.geoLastErr
+	s.mu.Unlock()
+	return map[string]any{
+		"dir":         st.Dir,
+		"ready":       st.Ready,
+		"fullReady":   st.FullReady,
+		"stale":       st.Stale,
+		"mode":        st.Mode,
+		"modeText":    st.ModeText,
+		"attribution": st.Attribution,
+		"files":       st.Files,
+		"updating":    updating,
+		"stage":       stage,
+		"done":        done,
+		"total":       total,
+		"lastError":   lastErr,
+	}
+}
+
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	running := s.running
@@ -325,7 +361,89 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"startedAt": startedAt,
 		"themes":    render.ThemeNames(),
 		"netEnv":    nodepool.GetNetworkEnv(),
+		"geoip":     s.geoipStatusPayload(),
 	})
+}
+
+func (s *server) handleGeoIPStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(s.geoipStatusPayload())
+}
+
+func (s *server) handleGeoIPUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Proxy string `json:"proxy"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "请求体不是合法 JSON", http.StatusBadRequest)
+			return
+		}
+	}
+
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		http.Error(w, "测速任务运行中，请等待测速完成后再更新 IP 库", http.StatusConflict)
+		return
+	}
+	if s.geoUpdating {
+		s.mu.Unlock()
+		http.Error(w, "IP 库正在更新中，请稍候", http.StatusConflict)
+		return
+	}
+	s.geoUpdating = true
+	s.geoLastErr = ""
+	s.geoStage = "正在连接更新源…"
+	s.geoDone = 0
+	s.geoTotal = 3
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusAccepted)
+	payload := s.geoipStatusPayload()
+	payload["status"] = "updating"
+	json.NewEncoder(w).Encode(payload)
+
+	go func(proxy string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		defer cancel()
+		defer func() {
+			s.mu.Lock()
+			s.geoUpdating = false
+			s.mu.Unlock()
+		}()
+
+		s.hub.logf("GeoIP：开始更新离线数据库…")
+		res, err := geo.UpdateDBs(ctx, geo.UpdateOptions{
+			Proxy: strings.TrimSpace(proxy),
+			OnProgress: func(stage string, done, total int) {
+				s.mu.Lock()
+				s.geoStage = stage
+				s.geoDone = done
+				s.geoTotal = total
+				s.mu.Unlock()
+				s.hub.logf("GeoIP：[%d/%d] %s", done, total, stage)
+			},
+		})
+		s.mu.Lock()
+		if err != nil {
+			s.geoLastErr = err.Error()
+			s.geoStage = "更新失败"
+			s.mu.Unlock()
+			s.hub.logf("GeoIP：更新失败：%v", err)
+			return
+		}
+		s.geoLastErr = ""
+		if len(res.Failed) > 0 {
+			s.geoStage = "部分更新完成"
+		} else {
+			s.geoStage = "更新完成"
+		}
+		s.mu.Unlock()
+		s.hub.logf("GeoIP：更新完成，已写入 %v（%s）", res.Updated, res.Status.ModeText)
+	}(req.Proxy)
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {

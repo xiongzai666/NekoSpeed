@@ -52,13 +52,17 @@ type PreflightResult struct {
 
 // PreflightServers 对 nodes 中出现的服务器域名做可达性预检。
 // 命中的域名写入 resolver.DefaultHosts（mihomo 解析时优先于 DNS）。
-// 服务器为 IP 字面量的节点不参与。上下文取消时提前返回。
+// 服务器为 IP 字面量的节点不参与；检测到本地 TUN 开启时，对纯 UDP 节点（如 Hysteria2 / TUIC）
+// 跳过 TCP 探活，但仍通过直连 DNS 解析真实 IP 并钉入 DefaultHosts，防止拨号误连 Fake-IP。
+// 上下文取消时提前返回。
 func PreflightServers(ctx context.Context, nodes []model.Node) PreflightResult {
 	type hostInfo struct {
 		ports map[uint16]struct{}
 	}
 	hosts := map[string]*hostInfo{}
 	var order []string
+	udpHosts := map[string]struct{}{}
+	var udpOrder []string
 	res := PreflightResult{}
 
 	for _, n := range nodes {
@@ -71,6 +75,10 @@ func PreflightServers(ctx context.Context, nodes []model.Node) PreflightResult {
 			continue // 已是 IP，无需预检
 		}
 		if isUDPOnlyNode(n) {
+			if _, ok := udpHosts[server]; !ok {
+				udpHosts[server] = struct{}{}
+				udpOrder = append(udpOrder, server)
+			}
 			res.SkippedHosts++
 			continue // 纯 UDP 协议（如 Hysteria2 / TUIC），不适用 TCP 端口预检
 		}
@@ -114,6 +122,39 @@ func PreflightServers(ctx context.Context, nodes []model.Node) PreflightResult {
 			res.PinnedHosts++
 		}(host, info.ports)
 	}
+
+	if GetNetworkEnv().TUNDetected {
+		for _, host := range udpOrder {
+			if _, hasTCP := hosts[host]; hasTCP {
+				continue
+			}
+			wg.Add(1)
+			go func(host string) {
+				defer wg.Done()
+				ips := sampleIPs(ctx, host)
+				if len(ips) == 0 {
+					if s := ResolveHostDirect(ctx, host); s != "" {
+						if addr, err := netip.ParseAddr(s); err == nil {
+							ips = []netip.Addr{addr.Unmap()}
+						}
+					}
+				}
+				if len(ips) == 0 {
+					return
+				}
+				hv, err := resolver.NewHostValueByIPs(ips)
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if err := resolver.DefaultHosts.Insert(host, hv); err == nil {
+					res.PinnedHosts++
+				}
+			}(host)
+		}
+	}
+
 	wg.Wait()
 	sort.Strings(res.FailedHosts)
 	return res

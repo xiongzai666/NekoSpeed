@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -32,10 +34,14 @@ import (
 var (
 	// cz88BaseURL 纯真官方高精查询端点（国内 IP 权威精准，区县级识别）。
 	cz88BaseURL = "https://www.cz88.net/api/cz88/ip/base"
+	// mir6BaseURL Mir6 免费国内 IP 归属接口（支持 IPv4/IPv6 区县与运营商）。
+	mir6BaseURL = "https://api.mir6.com/api/ip"
 	// baiduBaseURL 百度大数据 IP 查询端点。
 	baiduBaseURL = "https://opendata.baidu.com/api.php"
 	// pconlineBaseURL 太平洋电脑网国内 IP 查询端点。
 	pconlineBaseURL = "https://whois.pconline.com.cn/ipJson.jsp"
+	// bilibiliLocalURL B 站直播本机公网 IP 快速探测端点（仅用于本机 IPv4/IPv6 归属兜底）。
+	bilibiliLocalURL = "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo"
 	// cfTraceURL Cloudflare Trace 端点。走代理时实测真实出口 IP 与数据中心 (PoP)。
 	cfTraceURL = "https://cloudflare.com/cdn-cgi/trace"
 	// ipwhoisBaseURL ipwho.is 基础地址。支持中文与详细 ISP/ASN。
@@ -44,6 +50,8 @@ var (
 	ipsbBaseURL = "https://api.ip.sb/geoip"
 	// ipAPIBaseURL ip-api.com 基础地址。走代理时强制 http，避免额外证书问题。
 	ipAPIBaseURL = "http://ip-api.com"
+	// geojsBaseURL GeoJS 公益国际 GeoIP 兜底端点（免 Key、支持双栈）。
+	geojsBaseURL = "https://get.geojs.io/v1/ip/geo"
 	// ipinfoURL ipinfo.io 兜底端点（出口查询失败时使用）。
 	ipinfoURL = "https://ipinfo.io/json"
 )
@@ -74,9 +82,13 @@ func isMainlandChinaLoc(s string) bool {
 	return false
 }
 
-// Resolver 封装 GeoIP 查询后端，带 IP 级缓存、并发去重与直连源失败冷却。
+// Resolver 封装 GeoIP 查询后端，支持多 MMDB 分层离线加速、IP 级缓存、并发去重与直连源失败冷却。
 type Resolver struct {
-	mmdb         *maxminddb.Reader // nil 表示使用在线 API
+	customDB     *maxminddb.Reader // 显式传入单文件 -mmdb 时使用
+	cnDB         *maxminddb.Reader // GeoCN.mmdb（国内双栈区县+运营商）
+	ipinfoDB     *maxminddb.Reader // ipinfo_lite.mmdb（日更全球国家+ASN）
+	asnDB        *maxminddb.Reader // GeoLite2-ASN.mmdb（兜底 ASN）
+	cityDB       *maxminddb.Reader // GeoLite2-City.mmdb（全球城市）
 	directClient *http.Client      // 复用的直连 HTTP 客户端（绕过系统代理与本地 TUN）
 
 	mu             sync.Mutex
@@ -94,10 +106,37 @@ const (
 	directHTTPTimeout = 4 * time.Second
 	proxyHTTPTimeout  = 5 * time.Second
 	sourceCooldownTTL = 3 * time.Minute
+	globalCacheTTL    = 24 * time.Hour
 )
 
-// NewResolver 创建 Resolver。mmdbPath 非空时打开 MaxMind mmdb（GeoLite2-City、GeoLite2-ASN、
-// GeoIP2-CN 或 IPinfo Lite mmdb，自适应读取）；为空时使用高精在线引擎。
+type globalCacheEntry struct {
+	info      model.GeoInfo
+	expiresAt time.Time
+}
+
+var (
+	globalGeoMu    sync.Mutex
+	globalGeoCache = make(map[string]globalCacheEntry)
+)
+
+// ClearGlobalCache 清空进程级 GeoIP 缓存（离线 IP 库更新完成后调用）。
+func ClearGlobalCache() {
+	globalGeoMu.Lock()
+	clear(globalGeoCache)
+	globalGeoMu.Unlock()
+}
+
+func isMockedOnlineTest() bool {
+	for _, u := range []string{ipAPIBaseURL, cz88BaseURL, ipwhoisBaseURL, baiduBaseURL, pconlineBaseURL, ipsbBaseURL, mir6BaseURL, geojsBaseURL} {
+		if strings.Contains(u, "127.0.0.1") {
+			return true
+		}
+	}
+	return false
+}
+
+// NewResolver 创建 Resolver。mmdbPath 为单文件时打开该 MMDB，为目录时按多库模式打开，
+// 为空时自动探测 DefaultDBDir() 中的离线多库（不存在或仅部分存在时无缝协同在线引擎）。
 func NewResolver(mmdbPath string) (*Resolver, error) {
 	r := &Resolver{
 		cache:          make(map[string]model.GeoInfo),
@@ -112,25 +151,36 @@ func NewResolver(mmdbPath string) (*Resolver, error) {
 		},
 	}
 	if mmdbPath != "" {
-		db, err := maxminddb.Open(mmdbPath)
-		if err != nil {
-			r.directClient.CloseIdleConnections()
-			return nil, fmt.Errorf("打开 mmdb: %w", err)
+		if st, err := os.Stat(mmdbPath); err == nil && st.IsDir() {
+			r.openDirDBs(mmdbPath)
+		} else {
+			db, err := maxminddb.Open(mmdbPath)
+			if err != nil {
+				r.directClient.CloseIdleConnections()
+				return nil, fmt.Errorf("打开 mmdb: %w", err)
+			}
+			r.customDB = db
 		}
-		r.mmdb = db
+	} else if !isMockedOnlineTest() {
+		r.openDirDBs(DefaultDBDir())
 	}
 	return r, nil
 }
 
-// Close 释放 mmdb 句柄并关闭直连空闲连接。
+// Close 释放所有 MMDB 句柄并关闭直连空闲连接。
 func (r *Resolver) Close() error {
 	if r.directClient != nil {
 		r.directClient.CloseIdleConnections()
 	}
-	if r.mmdb != nil {
-		return r.mmdb.Close()
+	var firstErr error
+	for _, db := range []*maxminddb.Reader{r.customDB, r.cnDB, r.ipinfoDB, r.asnDB, r.cityDB} {
+		if db != nil {
+			if err := db.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // Lookup 查询 ip 的归属信息。Stack 按 IP 是 v4/v6 填 "4"/"6"。
@@ -148,6 +198,20 @@ func (r *Resolver) lookupCached(ctx context.Context, ip string, d model.Dialer, 
 	if g, ok := r.cache[ip]; ok {
 		r.mu.Unlock()
 		return g
+	}
+	if r.customDB == nil && !isMockedOnlineTest() {
+		globalGeoMu.Lock()
+		ent, ok := globalGeoCache[ip]
+		if ok && time.Now().Before(ent.expiresAt) {
+			globalGeoMu.Unlock()
+			r.cache[ip] = ent.info
+			r.mu.Unlock()
+			return ent.info
+		}
+		if ok {
+			delete(globalGeoCache, ip)
+		}
+		globalGeoMu.Unlock()
 	}
 	if c, ok := r.inflight[ip]; ok {
 		r.mu.Unlock()
@@ -169,6 +233,11 @@ func (r *Resolver) lookupCached(ctx context.Context, ip string, d model.Dialer, 
 	delete(r.inflight, ip)
 	c.info = g
 	r.mu.Unlock()
+	if r.customDB == nil && !isMockedOnlineTest() && (g.Country != "" || g.ASN != "") {
+		globalGeoMu.Lock()
+		globalGeoCache[ip] = globalCacheEntry{info: g, expiresAt: time.Now().Add(globalCacheTTL)}
+		globalGeoMu.Unlock()
+	}
 	close(c.done)
 	return g
 }
@@ -232,31 +301,82 @@ func mergeGeoMissing(base, extra model.GeoInfo) model.GeoInfo {
 }
 
 func (r *Resolver) doLookup(ctx context.Context, ip string, d model.Dialer, skipDomestic bool) model.GeoInfo {
-	if r.mmdb != nil {
-		g := r.lookupMMDB(ip)
-		// 若传了精简 MMDB（如仅 Country/City 缺 ASN 或仅 ASN 缺城市），用轻量在线查询补全空缺字段。
-		if g.Country != "" && g.City != "" && g.ASN != "" && g.Org != "" {
+	if r.hasLocalDB() {
+		g := r.lookupOffline(ip)
+		hasCitySource := r.cityDB != nil || r.customDB != nil
+		hasASNSource := r.ipinfoDB != nil || r.asnDB != nil || r.customDB != nil
+		complete := (hasCitySource && hasASNSource && g.Country != "" && g.ASN != "" &&
+			(g.Country != "CN" || r.cnDB != nil || g.City != "" || skipDomestic || d != nil)) ||
+			(g.Country != "" && g.City != "" && g.ASN != "" && g.Org != "")
+		if complete {
 			return g
 		}
 		supCtx, cancel := context.WithTimeout(ctx, directHTTPTimeout)
 		defer cancel()
-		return mergeGeoMissing(g, r.doLookupOnline(supCtx, ip, d, skipDomestic))
+		onlineSkipDomestic := skipDomestic || (g.Country != "" && g.Country != "CN")
+		return mergeGeoMissing(g, r.doLookupOnline(supCtx, ip, d, onlineSkipDomestic))
 	}
 	return r.doLookupOnline(ctx, ip, d, skipDomestic)
 }
 
 func (r *Resolver) doLookupOnline(ctx context.Context, ip string, d model.Dialer, skipDomestic bool) model.GeoInfo {
 	// 针对单测环境只 mock 了 ip-api 的特殊处理，优先走已 mock 端点
-	if strings.Contains(ipAPIBaseURL, "127.0.0.1") && !strings.Contains(cz88BaseURL, "127.0.0.1") && cfTraceURL == "https://cloudflare.com/cdn-cgi/trace" {
+	if strings.Contains(ipAPIBaseURL, "127.0.0.1") && !strings.Contains(cz88BaseURL, "127.0.0.1") &&
+		!strings.Contains(mir6BaseURL, "127.0.0.1") && !strings.Contains(geojsBaseURL, "127.0.0.1") &&
+		cfTraceURL == "https://cloudflare.com/cdn-cgi/trace" {
 		if g, err := r.lookupIPAPI(ctx, ip, d); err == nil {
 			return g
 		}
 		return model.GeoInfo{IP: ip, Stack: stackOf(ip)}
 	}
 
-	var domestic model.GeoInfo
-	// 1. 若为直连且未明确为海外 IP，优先调用国内高精纯真/百度/太平洋引擎
-	if d == nil && !skipDomestic {
+	// 1. 国际多源链优先（一次拿到 Country + City + ASN/Org；避免海外 IP 浪费国内纯真额度与多余 RTT）
+	var intl model.GeoInfo
+	if !(d == nil && r.isSourceCooling("ipapi")) {
+		if g, err := r.lookupIPAPI(ctx, ip, d); err == nil && g.Country != "" {
+			if d == nil {
+				r.clearSourceFailed("ipapi")
+			}
+			intl = g
+		} else if d == nil && isTransientSourceErr(err) {
+			r.markSourceFailed("ipapi", ipAPIBaseURL)
+		}
+	}
+	if intl.Country == "" && !(d == nil && r.isSourceCooling("ipsb")) {
+		if g, err := r.lookupIPSB(ctx, ip, d); err == nil && g.Country != "" {
+			if d == nil {
+				r.clearSourceFailed("ipsb")
+			}
+			intl = g
+		} else if d == nil && isTransientSourceErr(err) {
+			r.markSourceFailed("ipsb", ipsbBaseURL)
+		}
+	}
+	if intl.Country == "" && !(d == nil && r.isSourceCooling("ipwhois")) {
+		if g, err := r.lookupIPWhois(ctx, ip, d); err == nil && g.Country != "" {
+			if d == nil {
+				r.clearSourceFailed("ipwhois")
+			}
+			intl = g
+		} else if d == nil && isTransientSourceErr(err) {
+			r.markSourceFailed("ipwhois", ipwhoisBaseURL)
+		}
+	}
+	if intl.Country == "" && !(d == nil && r.isSourceCooling("geojs")) {
+		if g, err := r.lookupGeoJS(ctx, ip, d); err == nil && g.Country != "" {
+			if d == nil {
+				r.clearSourceFailed("geojs")
+			}
+			intl = g
+		} else if d == nil && isTransientSourceErr(err) {
+			r.markSourceFailed("geojs", geojsBaseURL)
+		}
+	}
+
+	// 2. 仅当国际源判定为中国大陆 (CN) 或全部国际源失败时，走国内高精链（纯真 -> Mir6 -> 百度/太平洋）补全区县与运营商
+	isV6 := stackOf(ip) == "6"
+	if d == nil && !skipDomestic && (intl.Country == "" || intl.Country == "CN") {
+		var domestic model.GeoInfo
 		if !r.isSourceCooling("cz88") {
 			if g, err := r.lookupCZ88(ctx, ip, nil); err == nil {
 				r.clearSourceFailed("cz88")
@@ -267,7 +387,15 @@ func (r *Resolver) doLookupOnline(ctx context.Context, ip string, d model.Dialer
 				r.markSourceFailed("cz88", cz88BaseURL)
 			}
 		}
-		if domestic.Country == "" && !r.isSourceCooling("baidu") {
+		if domestic.Country == "" && !r.isSourceCooling("mir6") {
+			if g, err := r.lookupMir6(ctx, ip, nil); err == nil && g.Country != "" {
+				r.clearSourceFailed("mir6")
+				domestic = g
+			} else if isTransientSourceErr(err) {
+				r.markSourceFailed("mir6", mir6BaseURL)
+			}
+		}
+		if !isV6 && domestic.Country == "" && !r.isSourceCooling("baidu") {
 			if g, err := r.lookupBaidu(ctx, ip, nil); err == nil && g.Country != "" {
 				r.clearSourceFailed("baidu")
 				domestic = g
@@ -275,7 +403,7 @@ func (r *Resolver) doLookupOnline(ctx context.Context, ip string, d model.Dialer
 				r.markSourceFailed("baidu", baiduBaseURL)
 			}
 		}
-		if domestic.Country == "" && !r.isSourceCooling("pconline") {
+		if !isV6 && domestic.Country == "" && !r.isSourceCooling("pconline") {
 			if g, err := r.lookupPCOnline(ctx, ip, nil); err == nil && g.Country != "" {
 				r.clearSourceFailed("pconline")
 				domestic = g
@@ -283,48 +411,27 @@ func (r *Resolver) doLookupOnline(ctx context.Context, ip string, d model.Dialer
 				r.markSourceFailed("pconline", pconlineBaseURL)
 			}
 		}
-		if domestic.Country != "" {
-			if domestic.ASN != "" {
-				return domestic
+		if domestic.Country == "CN" {
+			if intl.ASN != "" {
+				domestic.ASN = intl.ASN
 			}
-			// 国内高精库（如纯真/百度/太平洋）常常不含数字 ASN，补充一次快速国际查询仅补全 ASN/Org。
-			if extra, ok := r.lookupFastMetaDirect(ctx, ip); ok {
-				return mergeGeoMissing(domestic, model.GeoInfo{ASN: extra.ASN, Org: extra.Org, ISP: extra.ISP})
+			if intl.Org != "" {
+				domestic.Org = intl.Org
+			}
+			if domestic.ISP == "" && intl.ISP != "" {
+				domestic.ISP = intl.ISP
+			}
+			if domestic.ASN == "" {
+				if extra, ok := r.lookupFastMetaDirect(ctx, ip); ok {
+					return mergeGeoMissing(domestic, model.GeoInfo{ASN: extra.ASN, Org: extra.Org, ISP: extra.ISP})
+				}
 			}
 			return domestic
 		}
 	}
 
-	// 2. 国际多源链式查询（直连启用失败冷却，避免不可达源逐节点卡满超时）
-	if !(d == nil && r.isSourceCooling("ipwhois")) {
-		if g, err := r.lookupIPWhois(ctx, ip, d); err == nil && g.Country != "" {
-			if d == nil {
-				r.clearSourceFailed("ipwhois")
-			}
-			return g
-		} else if d == nil && isTransientSourceErr(err) {
-			r.markSourceFailed("ipwhois", ipwhoisBaseURL)
-		}
-	}
-	if !(d == nil && r.isSourceCooling("ipsb")) {
-		if g, err := r.lookupIPSB(ctx, ip, d); err == nil && g.Country != "" {
-			if d == nil {
-				r.clearSourceFailed("ipsb")
-			}
-			return g
-		} else if d == nil && isTransientSourceErr(err) {
-			r.markSourceFailed("ipsb", ipsbBaseURL)
-		}
-	}
-	if !(d == nil && r.isSourceCooling("ipapi")) {
-		if g, err := r.lookupIPAPI(ctx, ip, d); err == nil {
-			if d == nil {
-				r.clearSourceFailed("ipapi")
-			}
-			return g
-		} else if d == nil && isTransientSourceErr(err) {
-			r.markSourceFailed("ipapi", ipAPIBaseURL)
-		}
+	if intl.Country != "" {
+		return intl
 	}
 	return model.GeoInfo{IP: ip, Stack: stackOf(ip)}
 }
@@ -353,113 +460,58 @@ func (r *Resolver) lookupFastMetaDirect(ctx context.Context, ip string) (model.G
 	return model.GeoInfo{}, false
 }
 
-// isTransientSourceErr 区分网络超时/限频等源端故障与业务拒绝（如“非中国大陆 IP”）。
+// isTransientSourceErr 区分网络超时/限频等源端故障与业务拒绝（如“非中国大陆 IP”、不支持 IPv6 或返回 IP 不匹配）。
 func isTransientSourceErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "非中国大陆") {
+	if strings.Contains(msg, "非中国大陆") || strings.Contains(msg, "不支持 IPv6") || strings.Contains(msg, "返回 IP 不匹配") {
 		return false
 	}
 	return true
 }
 
-// lookupMMDB 查本地库。支持 MaxMind 官方库、GeoIP2-CN 以及 IPinfo Lite 等 MMDB 变种。
-func (r *Resolver) lookupMMDB(ip string) model.GeoInfo {
-	g := model.GeoInfo{IP: ip, Stack: stackOf(ip)}
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return g
+// sameIP 规范化比较两个 IP 字符串是否表示同一地址（兼容 IPv6 大小写与零压缩写法）。
+func sameIP(a, b string) bool {
+	pa, errA := netip.ParseAddr(strings.TrimSpace(a))
+	pb, errB := netip.ParseAddr(strings.TrimSpace(b))
+	if errA == nil && errB == nil {
+		return pa.Unmap() == pb.Unmap()
 	}
-	var rec struct {
-		Country struct {
-			ISOCode string            `maxminddb:"iso_code"`
-			Names   map[string]string `maxminddb:"names"`
-		} `maxminddb:"country"`
-		RegisteredCountry struct {
-			ISOCode string            `maxminddb:"iso_code"`
-			Names   map[string]string `maxminddb:"names"`
-		} `maxminddb:"registered_country"`
-		Subdivisions []struct {
-			Names map[string]string `maxminddb:"names"`
-		} `maxminddb:"subdivisions"`
-		City struct {
-			Names map[string]string `maxminddb:"names"`
-		} `maxminddb:"city"`
-		AutonomousSystemNumber       uint   `maxminddb:"autonomous_system_number"`
-		AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
-		ISP                          string `maxminddb:"isp"`
-		Organization                 string `maxminddb:"organization"`
-		// 兼容 IPinfo Lite MMDB 等非标准结构
-		IPinfoCountry string `maxminddb:"country"`
-		IPinfoASN     string `maxminddb:"asn"`
-		IPinfoASName  string `maxminddb:"as_name"`
-	}
-	if err := r.mmdb.Lookup(parsed, &rec); err != nil {
-		return g
-	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
 
-	pickName := func(m map[string]string) string {
-		if s, ok := m["zh-CN"]; ok && s != "" {
-			return s
-		}
-		if s, ok := m["en"]; ok && s != "" {
-			return s
-		}
-		for _, s := range m {
-			if s != "" {
-				return s
+// refineCNLocal 尝试使用离线 GeoCN 或国内高精接口补全指定国内 IP 的省/市/区县与运营商。
+func (r *Resolver) refineCNLocal(ctx context.Context, ip string) (model.GeoInfo, bool) {
+	if ip == "" {
+		return model.GeoInfo{}, false
+	}
+	if r.cnDB != nil {
+		if parsed := net.ParseIP(ip); parsed != nil {
+			if cn, ok := lookupGeoCNReader(r.cnDB, parsed); ok && cn.City != "" {
+				cn.IP = ip
+				cn.Stack = stackOf(ip)
+				return cn, true
 			}
 		}
-		return ""
 	}
-
-	g.Country = rec.Country.ISOCode
-	if g.Country == "" {
-		g.Country = rec.RegisteredCountry.ISOCode
+	if g, err := r.lookupCZ88(ctx, ip, nil); err == nil && g.Country != "" {
+		return g, true
 	}
-	if g.Country == "" && rec.IPinfoCountry != "" {
-		g.Country = rec.IPinfoCountry
+	if g, err := r.lookupMir6(ctx, ip, nil); err == nil && g.Country != "" {
+		return g, true
 	}
-
-	if len(rec.Subdivisions) > 0 {
-		g.Region = pickName(rec.Subdivisions[0].Names)
-	}
-	g.City = pickName(rec.City.Names)
-
-	if rec.AutonomousSystemNumber != 0 {
-		g.ASN = fmt.Sprintf("AS%d", rec.AutonomousSystemNumber)
-	} else if rec.IPinfoASN != "" {
-		if strings.HasPrefix(rec.IPinfoASN, "AS") {
-			g.ASN = rec.IPinfoASN
-		} else {
-			g.ASN = "AS" + rec.IPinfoASN
+	if stackOf(ip) != "6" {
+		if g, err := r.lookupBaidu(ctx, ip, nil); err == nil && g.Country != "" {
+			return g, true
 		}
 	}
-
-	if rec.ISP != "" {
-		g.ISP = rec.ISP
-	} else if rec.Organization != "" {
-		g.ISP = rec.Organization
-	} else if rec.IPinfoASName != "" {
-		g.ISP = rec.IPinfoASName
-	} else {
-		g.ISP = rec.AutonomousSystemOrganization
-	}
-
-	g.Org = rec.AutonomousSystemOrganization
-	if g.Org == "" {
-		g.Org = rec.Organization
-	}
-	if g.Org == "" {
-		g.Org = rec.IPinfoASName
-	}
-	return g
+	return model.GeoInfo{}, false
 }
 
 // LookupLocalNetwork 查询本机公网 IP 的归属（不经过代理）。
-// 优先国内权威高精数据源（纯真 CZ88、百度大数据、太平洋电脑网），
+// 优先国内权威高精数据源（GeoCN / 纯真 CZ88 / Mir6 / 百度大数据 / 太平洋 / Bilibili），
 // 准确识别到地级市/区县（如安徽省安庆市桐城市 -> 桐城移动 / 安庆移动）。
 func (r *Resolver) LookupLocalNetwork(ctx context.Context) model.GeoInfo {
 	// 单测环境下优先走已 mock 端点
@@ -474,16 +526,23 @@ func (r *Resolver) LookupLocalNetwork(ctx context.Context) model.GeoInfo {
 	}
 
 	// 1. 优先从太平洋电脑网获取本机公网 IPv4（无需传参，同时可拿到国内基线位置）；
-	// 再携带该 IP 调用纯真 CZ88 / 百度大数据，确保精准识别到县级市（纯真/百度缺 ip 参数会直接报错）。
+	// 再携带该 IP 调用离线 GeoCN / 纯真 CZ88 / Mir6 / 百度大数据，确保精准识别到县级市。
 	pcGeo, pcIP, pcErr := r.lookupPCOnlineWithIP(ctx, "", nil)
 	if pcErr == nil && pcGeo.IP != "" {
-		if g, err := r.lookupCZ88(ctx, pcGeo.IP, nil); err == nil && g.Country != "" {
-			return r.putCache(g)
-		}
-		if g, err := r.lookupBaidu(ctx, pcGeo.IP, nil); err == nil && g.Country != "" {
-			return r.putCache(g)
+		if refined, ok := r.refineCNLocal(ctx, pcGeo.IP); ok {
+			return r.putCache(refined)
 		}
 		return r.putCache(pcGeo)
+	}
+
+	// 若太平洋失败且未拿到 IP，尝试 Bilibili 本机出口快速探测（约 100ms，双栈支持）
+	if pcErr != nil && pcIP == "" {
+		if bili, err := r.lookupBilibiliLocal(ctx); err == nil && bili.IP != "" {
+			if refined, ok := r.refineCNLocal(ctx, bili.IP); ok {
+				return r.putCache(refined)
+			}
+			return r.putCache(bili)
+		}
 	}
 
 	// 若太平洋接口已返回非中国大陆 IP，则跳过国内库，直接携带该 IP 查国际源。
@@ -492,7 +551,7 @@ func (r *Resolver) LookupLocalNetwork(ctx context.Context) model.GeoInfo {
 		queryIP = pcIP
 	}
 
-	// 2. 备选国际链路：api.ip.sb -> ip-api.com -> ipwho.is -> ipinfo.io（优先响应快的接口，避免国内直连在 ipwho.is 空等）
+	// 2. 备选国际链路：api.ip.sb -> ip-api.com -> ipwho.is -> geojs -> ipinfo.io
 	var g model.GeoInfo
 	var ok bool
 	if !r.isSourceCooling("ipsb") {
@@ -519,6 +578,14 @@ func (r *Resolver) LookupLocalNetwork(ctx context.Context) model.GeoInfo {
 			r.markSourceFailed("ipwhois", ipwhoisBaseURL)
 		}
 	}
+	if !ok && queryIP != "" && !r.isSourceCooling("geojs") {
+		if res, err := r.lookupGeoJS(ctx, queryIP, nil); err == nil && res.IP != "" {
+			r.clearSourceFailed("geojs")
+			g, ok = res, true
+		} else if isTransientSourceErr(err) {
+			r.markSourceFailed("geojs", geojsBaseURL)
+		}
+	}
 	if !ok && queryIP == "" {
 		if res, err := r.lookupIPInfo(ctx, nil); err == nil && res.IP != "" {
 			g, ok = res, true
@@ -528,13 +595,10 @@ func (r *Resolver) LookupLocalNetwork(ctx context.Context) model.GeoInfo {
 		return model.GeoInfo{}
 	}
 
-	// 若太平洋接口失败但国际链路拿到的是国内 IP（例如 IPv6），尝试用纯真/百度做区县级精度补全。
+	// 若太平洋接口失败但国际链路拿到的是国内 IP（例如 IPv6），尝试用 GeoCN/纯真/Mir6/百度做区县级精度补全。
 	if g.Country == "CN" && (pcErr != nil && pcIP == "") {
-		if cz, err := r.lookupCZ88(ctx, g.IP, nil); err == nil && cz.Country != "" {
-			return r.putCache(cz)
-		}
-		if bd, err := r.lookupBaidu(ctx, g.IP, nil); err == nil && bd.Country != "" {
-			return r.putCache(bd)
+		if refined, ok := r.refineCNLocal(ctx, g.IP); ok {
+			return r.putCache(refined)
 		}
 	}
 	return r.putCache(g)
@@ -576,15 +640,9 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 	cfGeo, err := r.lookupCFTrace(ctx, d)
 	if err == nil && cfGeo.IP != "" {
 		// 已通过真实物理测量锁定了真实出口 IP 与落地国家/机房代码
-		// 接下来补全 ASN / Org / ISP / City 详细元数据（走缓存/inflight 去重）
-		var meta model.GeoInfo
-		if r.mmdb != nil {
-			meta = r.lookupMMDB(cfGeo.IP)
-		} else {
-			// 在线补全：直连查询该 IP；若 CF Trace 已判定非 CN 落地，直接跳过国内专属接口
-			skipDomestic := cfGeo.Country != "" && cfGeo.Country != "CN"
-			meta = r.lookupCached(ctx, cfGeo.IP, nil, skipDomestic)
-		}
+		// 接下来补全 ASN / Org / ISP / City 详细元数据（优先本地多 MMDB，缺失再直连在线补全）
+		skipDomestic := cfGeo.Country != "" && cfGeo.Country != "CN"
+		meta := r.lookupCached(ctx, cfGeo.IP, nil, skipDomestic)
 
 		out := cfGeo
 		if meta.ASN != "" {
@@ -625,10 +683,9 @@ func (r *Resolver) resolveOutbound(ctx context.Context, d model.Dialer) *model.G
 	return nil
 }
 
-// finishOutbound 出口补全：mmdb 模式下若已有完整归属则复用，否则查本地库；
-// 在线模式下直接写入缓存去重。
+// finishOutbound 出口补全：有本地库时若缺字段则补查，否则直接写入缓存去重。
 func (r *Resolver) finishOutbound(g model.GeoInfo) *model.GeoInfo {
-	if r.mmdb != nil && (g.ASN == "" || g.Org == "") {
+	if r.hasLocalDB() && (g.ASN == "" || g.Org == "") {
 		out := r.Lookup(context.Background(), g.IP, nil)
 		// 优先保留实测的国家
 		if g.Country != "" {
@@ -743,23 +800,17 @@ func (r *Resolver) lookupCZ88(ctx context.Context, ip string, d model.Dialer) (m
 	if !a.Success || a.Data.IP == "" {
 		return model.GeoInfo{}, fmt.Errorf("cz88 查询失败")
 	}
+	if ip != "" && !sameIP(ip, a.Data.IP) {
+		return model.GeoInfo{}, fmt.Errorf("cz88 返回 IP 不匹配: 请求 %s 实际 %s", ip, a.Data.IP)
+	}
 	// 城市与区县融合：若区县有值（如“桐城市”），结合地级市（如“安庆”）形成“安庆桐城”，更具辨识度；
-	// 过滤“市辖区”等泛指行政区名，避免拼出“合肥市辖区”。
-	district := strings.TrimSpace(a.Data.Districts)
-	if district == "市辖区" || strings.Contains(district, "直辖县") {
-		district = ""
-	}
-	locCity := district
-	if locCity != "" && a.Data.City != "" && !strings.Contains(locCity, strings.TrimSuffix(a.Data.City, "市")) {
-		locCity = strings.TrimSuffix(a.Data.City, "市") + strings.TrimSuffix(locCity, "市")
-	} else if locCity == "" {
-		locCity = a.Data.City
-	}
+	// 过滤“市辖区”“未知”等泛指词。
+	locCity := fuseCityDistrict(a.Data.City, a.Data.Districts)
 	g := model.GeoInfo{
 		IP:      a.Data.IP,
 		Stack:   stackOf(a.Data.IP),
 		Country: a.Data.CountryCode,
-		Region:  a.Data.Province,
+		Region:  cleanUnknownLoc(a.Data.Province),
 		City:    locCity,
 		ISP:     a.Data.ISP,
 		Org:     a.Data.ASN,
@@ -773,8 +824,93 @@ func (r *Resolver) lookupCZ88(ctx context.Context, ip string, d model.Dialer) (m
 	return g, nil
 }
 
-// lookupBaidu 查询百度大数据 IP 归属（仅认可中国大陆结果，避免海外 IP 被误标为 CN）。
+// lookupMir6 查询 Mir6 国内 IP 归属（支持 IPv4 与 IPv6 区县级定位，仅认可中国大陆结果）。
+func (r *Resolver) lookupMir6(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
+	url := mir6BaseURL + "?type=json"
+	if ip != "" {
+		url += "&ip=" + ip
+	}
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", d, 1<<20)
+	if err != nil {
+		return model.GeoInfo{}, err
+	}
+	var a struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			IP          string `json:"ip"`
+			CountryCode string `json:"countryCode"`
+			Province    string `json:"province"`
+			City        string `json:"city"`
+			Districts   string `json:"districts"`
+			ISP         string `json:"isp"`
+			Location    string `json:"location"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &a); err != nil {
+		return model.GeoInfo{}, err
+	}
+	rawIP := strings.TrimSpace(a.Data.IP)
+	if a.Code != 200 || rawIP == "" {
+		return model.GeoInfo{}, fmt.Errorf("mir6 查询失败: %s", a.Msg)
+	}
+	if ip != "" && !sameIP(ip, rawIP) {
+		return model.GeoInfo{}, fmt.Errorf("mir6 返回 IP 不匹配: 请求 %s 实际 %s", ip, rawIP)
+	}
+	if !isMainlandChinaLoc(a.Data.Province) && !isMainlandChinaLoc(a.Data.Location) {
+		return model.GeoInfo{}, fmt.Errorf("mir6 非中国大陆 IP: %s", a.Data.Location)
+	}
+	return model.GeoInfo{
+		IP:      rawIP,
+		Stack:   stackOf(rawIP),
+		Country: "CN",
+		Region:  cleanUnknownLoc(a.Data.Province),
+		City:    fuseCityDistrict(a.Data.City, a.Data.Districts),
+		ISP:     normalizeCNISP(a.Data.ISP),
+	}, nil
+}
+
+// lookupBilibiliLocal 通过 B 站接口快速探测本机当前公网 IP 与大致归属（仅用于无入参本机兜底）。
+func (r *Resolver) lookupBilibiliLocal(ctx context.Context) (model.GeoInfo, error) {
+	body, err := r.doGet(ctx, bilibiliLocalURL, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", nil, 1<<20)
+	if err != nil {
+		return model.GeoInfo{}, err
+	}
+	var a struct {
+		Code int `json:"code"`
+		Data struct {
+			Addr     string `json:"addr"`
+			Country  string `json:"country"`
+			Province string `json:"province"`
+			City     string `json:"city"`
+			ISP      string `json:"isp"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &a); err != nil {
+		return model.GeoInfo{}, err
+	}
+	rawIP := strings.TrimSpace(a.Data.Addr)
+	if a.Code != 0 || rawIP == "" || net.ParseIP(rawIP) == nil {
+		return model.GeoInfo{}, fmt.Errorf("bilibili 查询失败")
+	}
+	if !isMainlandChinaLoc(a.Data.Country + " " + a.Data.Province + " " + a.Data.City) {
+		return model.GeoInfo{}, fmt.Errorf("bilibili 非中国大陆 IP: %s %s", a.Data.Country, a.Data.Province)
+	}
+	return model.GeoInfo{
+		IP:      rawIP,
+		Stack:   stackOf(rawIP),
+		Country: "CN",
+		Region:  cleanUnknownLoc(a.Data.Province),
+		City:    cleanUnknownLoc(a.Data.City),
+		ISP:     normalizeCNISP(a.Data.ISP),
+	}, nil
+}
+
+// lookupBaidu 查询百度大数据 IP 归属（仅认可中国大陆 IPv4 结果，避免海外或 IPv6 请求误标）。
 func (r *Resolver) lookupBaidu(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
+	if ip != "" && stackOf(ip) == "6" {
+		return model.GeoInfo{}, fmt.Errorf("baidu 不支持 IPv6: %s", ip)
+	}
 	url := baiduBaseURL + "?resource_id=6006&oe=utf8"
 	if ip != "" {
 		url += "&query=" + ip
@@ -797,7 +933,10 @@ func (r *Resolver) lookupBaidu(ctx context.Context, ip string, d model.Dialer) (
 	if !isMainlandChinaLoc(loc) {
 		return model.GeoInfo{}, fmt.Errorf("baidu 非中国大陆 IP: %s", loc)
 	}
-	retIP := a.Data[0].Origip
+	retIP := strings.TrimSpace(a.Data[0].Origip)
+	if ip != "" && retIP != "" && !sameIP(ip, retIP) {
+		return model.GeoInfo{}, fmt.Errorf("baidu 返回 IP 不匹配: 请求 %s 实际 %s", ip, retIP)
+	}
 	if retIP == "" {
 		retIP = ip
 	}
@@ -840,6 +979,9 @@ func (r *Resolver) lookupPCOnline(ctx context.Context, ip string, d model.Dialer
 
 // lookupPCOnlineWithIP 查询太平洋电脑网并返回解析出的原始 IP（即使判定为海外 IP 也保留 rawIP 供后续国际链路复用）。
 func (r *Resolver) lookupPCOnlineWithIP(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, string, error) {
+	if ip != "" && stackOf(ip) == "6" {
+		return model.GeoInfo{}, "", fmt.Errorf("pconline 不支持 IPv6: %s", ip)
+	}
 	url := pconlineBaseURL + "?json=true"
 	if ip != "" {
 		url += "&ip=" + ip
@@ -864,6 +1006,9 @@ func (r *Resolver) lookupPCOnlineWithIP(ctx context.Context, ip string, d model.
 		return model.GeoInfo{}, "", fmt.Errorf("pconline 查询失败")
 	}
 	rawIP := strings.TrimSpace(a.IP)
+	if ip != "" && !sameIP(ip, rawIP) {
+		return model.GeoInfo{}, "", fmt.Errorf("pconline 返回 IP 不匹配: 请求 %s 实际 %s", ip, rawIP)
+	}
 	if !isMainlandChinaLoc(a.Pro) && !isMainlandChinaLoc(a.Addr) {
 		return model.GeoInfo{}, rawIP, fmt.Errorf("pconline 非中国大陆 IP: %s", a.Addr)
 	}
@@ -947,6 +1092,9 @@ func (r *Resolver) lookupIPWhois(ctx context.Context, ip string, d model.Dialer)
 	if !a.Success || a.IP == "" {
 		return model.GeoInfo{}, fmt.Errorf("ipwhois 查询失败: %s", a.Message)
 	}
+	if ip != "" && !sameIP(ip, a.IP) {
+		return model.GeoInfo{}, fmt.Errorf("ipwhois 返回 IP 不匹配: 请求 %s 实际 %s", ip, a.IP)
+	}
 	g := model.GeoInfo{
 		IP:      a.IP,
 		Stack:   stackOf(a.IP),
@@ -990,6 +1138,9 @@ func (r *Resolver) lookupIPSB(ctx context.Context, ip string, d model.Dialer) (m
 	}
 	if a.IP == "" {
 		return model.GeoInfo{}, fmt.Errorf("ip.sb 未返回有效 IP")
+	}
+	if ip != "" && !sameIP(ip, a.IP) {
+		return model.GeoInfo{}, fmt.Errorf("ip.sb 返回 IP 不匹配: 请求 %s 实际 %s", ip, a.IP)
 	}
 	g := model.GeoInfo{
 		IP:      a.IP,
@@ -1036,6 +1187,9 @@ func (r *Resolver) lookupIPAPI(ctx context.Context, ip string, d model.Dialer) (
 	}
 	if a.Status != "success" || a.Query == "" {
 		return model.GeoInfo{}, fmt.Errorf("ip-api 查询失败: %s", a.Status)
+	}
+	if ip != "" && !sameIP(ip, a.Query) {
+		return model.GeoInfo{}, fmt.Errorf("ip-api 返回 IP 不匹配: 请求 %s 实际 %s", ip, a.Query)
 	}
 	g := model.GeoInfo{
 		IP:      a.Query,
@@ -1091,6 +1245,50 @@ func (r *Resolver) lookupIPInfo(ctx context.Context, d model.Dialer) (model.GeoI
 		}
 	} else {
 		g.Org = a.Org
+	}
+	return g, nil
+}
+
+// lookupGeoJS 查询 GeoJS 免费国际 GeoIP 端点（双栈支持，免 Key 兜底）。
+func (r *Resolver) lookupGeoJS(ctx context.Context, ip string, d model.Dialer) (model.GeoInfo, error) {
+	url := geojsBaseURL + ".json"
+	if ip != "" {
+		url = geojsBaseURL + "/" + ip + ".json"
+	}
+	body, err := r.doGet(ctx, url, "Mozilla/5.0 NekoSpeed/1.0", d, 1<<20)
+	if err != nil {
+		return model.GeoInfo{}, err
+	}
+	var a struct {
+		IP               string `json:"ip"`
+		CountryCode      string `json:"country_code"`
+		Region           string `json:"region"`
+		City             string `json:"city"`
+		ASN              int    `json:"asn"`
+		OrganizationName string `json:"organization_name"`
+	}
+	if err := json.Unmarshal(body, &a); err != nil {
+		return model.GeoInfo{}, err
+	}
+	rawIP := strings.TrimSpace(a.IP)
+	if rawIP == "" {
+		return model.GeoInfo{}, fmt.Errorf("geojs 未返回有效 IP")
+	}
+	if ip != "" && !sameIP(ip, rawIP) {
+		return model.GeoInfo{}, fmt.Errorf("geojs 返回 IP 不匹配: 请求 %s 实际 %s", ip, rawIP)
+	}
+	org := cleanUnknownLoc(a.OrganizationName)
+	g := model.GeoInfo{
+		IP:      rawIP,
+		Stack:   stackOf(rawIP),
+		Country: strings.ToUpper(strings.TrimSpace(a.CountryCode)),
+		Region:  cleanUnknownLoc(a.Region),
+		City:    cleanUnknownLoc(a.City),
+		Org:     org,
+		ISP:     org,
+	}
+	if a.ASN > 0 && !(a.ASN == 64512 && org == "") {
+		g.ASN = fmt.Sprintf("AS%d", a.ASN)
 	}
 	return g, nil
 }

@@ -25,6 +25,13 @@
   var themeToggleLabel = el('themeToggleLabel');
   var themeIconUse = el('themeIconUse');
   var toggleLogCardBtn = el('toggleLogCardBtn');
+  var updateGeoBtn = el('updateGeoBtn');
+  var geoBtnLabel = el('geoBtnLabel');
+  var advUpdateGeoBtn = el('advUpdateGeoBtn');
+  var geoModeBadge = el('geoModeBadge');
+  var geoModeText = el('geoModeText');
+  var geoFilesList = el('geoFilesList');
+  var geoAttribution = el('geoAttribution');
   var toggleAdvBtn = el('toggleAdvBtn');
   var advDrawer = el('advDrawer');
 
@@ -130,7 +137,10 @@
     authToken: '',
     eventSource: null,
     tableRenderTimer: null,
-    tableRenderRaf: null
+    tableRenderRaf: null,
+    geoUpdating: false,
+    geoPollTimer: null,
+    lastGeoState: null
   };
 
   var PRESET_MAP = {
@@ -926,6 +936,9 @@
       statusPill.classList.remove('running');
       statusText.textContent = '就绪';
     }
+    if (state.lastGeoState) {
+      renderGeoStatus(state.lastGeoState);
+    }
   }
 
   function appendLog(line) {
@@ -934,7 +947,7 @@
 
     var div = document.createElement('div');
     div.className = 'log-line';
-    if (/^预检：|^输出目录：|^共 \d+ 个节点|^网络环境：/.test(line)) div.className += ' info';
+    if (/^预检：|^输出目录：|^共 \d+ 个节点|^网络环境：|^GeoIP：/.test(line)) div.className += ' info';
     else if (/跳过/.test(line)) div.className += ' warn';
     else if (/失败|错误|取消/.test(line)) div.className += ' err';
     else if (/^完成：/.test(line)) div.className += ' ok';
@@ -1714,11 +1727,164 @@
     es.onerror = function () {};
   }
 
+  function formatGeoBytes(bytes) {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+  }
+
+  function renderGeoStatus(g) {
+    if (!g) return;
+    state.lastGeoState = g;
+    state.geoUpdating = Boolean(g.updating);
+    var busy = state.geoUpdating || state.isRunning;
+
+    if (updateGeoBtn) {
+      updateGeoBtn.disabled = busy;
+      if (state.geoUpdating) {
+        geoBtnLabel.textContent = '更新中 ' + (g.done || 0) + '/' + (g.total || 3);
+      } else if (!g.ready) {
+        geoBtnLabel.textContent = '下载 IP 库';
+      } else if (g.stale) {
+        geoBtnLabel.textContent = '更新 IP 库 (待更新)';
+      } else {
+        geoBtnLabel.textContent = '更新 IP 库';
+      }
+      var titleParts = [g.modeText || 'GeoIP 状态'];
+      if (g.dir) titleParts.push('目录: ' + g.dir);
+      (g.files || []).forEach(function (f) {
+        if (f.present) {
+          titleParts.push(f.name + ': ' + formatGeoBytes(f.size) + (f.updatedAt ? (' · ' + f.updatedAt) : ''));
+        }
+      });
+      updateGeoBtn.title = titleParts.join('\n');
+    }
+
+    if (advUpdateGeoBtn) {
+      advUpdateGeoBtn.disabled = busy;
+      advUpdateGeoBtn.textContent = state.geoUpdating ? ('更新中 ' + (g.done || 0) + '/' + (g.total || 3)) : (g.ready ? '立即更新' : '一键下载');
+    }
+
+    if (geoModeBadge) {
+      geoModeBadge.classList.remove('is-offline', 'is-hybrid', 'is-online');
+      if (g.mode === 'offline') {
+        geoModeBadge.classList.add('is-offline');
+        geoModeBadge.textContent = '离线加速';
+      } else if (g.mode === 'hybrid') {
+        geoModeBadge.classList.add('is-hybrid');
+        geoModeBadge.textContent = '混合模式';
+      } else {
+        geoModeBadge.classList.add('is-online');
+        geoModeBadge.textContent = '纯在线';
+      }
+    }
+
+    if (geoModeText) {
+      geoModeText.textContent = state.geoUpdating ? (g.stage || '正在更新离线 IP 库…') : (g.modeText || '');
+    }
+
+    if (geoAttribution && g.attribution) {
+      geoAttribution.textContent = g.attribution;
+    }
+
+    if (geoFilesList) {
+      geoFilesList.innerHTML = '';
+      var files = Array.isArray(g.files) ? g.files : [];
+      var hasIPinfo = files.some(function (f) { return f.name === 'ipinfo_lite.mmdb' && f.present; });
+      var hasMaxMindASN = files.some(function (f) { return f.name === 'GeoLite2-ASN.mmdb' && f.present; });
+      files.forEach(function (f) {
+        if (f.name === 'GeoLite2-ASN.mmdb' && hasIPinfo && !f.present) return;
+        if (f.name === 'ipinfo_lite.mmdb' && !f.present && hasMaxMindASN) return;
+        var chip = document.createElement('span');
+        chip.className = 'geo-file-chip' + (f.present ? ' is-present' : '') + (f.stale ? ' is-stale' : '');
+        var shortName = f.name.replace(/\.mmdb$/i, '');
+        if (f.present) {
+          chip.textContent = shortName + ' · ' + formatGeoBytes(f.size);
+          chip.title = f.label + '（更新于 ' + (f.updatedAt || '未知') + '）';
+        } else {
+          chip.textContent = shortName + ' · 未下载';
+          chip.title = f.label + '（尚未下载）';
+        }
+        geoFilesList.appendChild(chip);
+      });
+    }
+  }
+
+  function stopGeoPolling() {
+    if (state.geoPollTimer) {
+      clearInterval(state.geoPollTimer);
+      state.geoPollTimer = null;
+    }
+  }
+
+  function startGeoPolling() {
+    if (state.geoPollTimer) return;
+    state.geoPollTimer = setInterval(function () {
+      apiFetch('/api/geoip/status').then(function (r) {
+        if (!r.ok) return null;
+        return r.json();
+      }).then(function (g) {
+        if (!g) return;
+        var wasUpdating = state.geoUpdating;
+        renderGeoStatus(g);
+        if (!g.updating) {
+          stopGeoPolling();
+          if (wasUpdating) {
+            if (g.lastError) {
+              showToast('IP 库更新失败：' + g.lastError, 'err');
+            } else {
+              showToast('离线 IP 库已更新：' + (g.modeText || '完成'), 'ok');
+            }
+          }
+        }
+      }).catch(function () {});
+    }, 1000);
+  }
+
+  function triggerGeoUpdate() {
+    if (state.geoUpdating || state.isRunning) return;
+    var proxyVal = el('proxy') ? el('proxy').value.trim() : '';
+    if (updateGeoBtn) updateGeoBtn.disabled = true;
+    if (advUpdateGeoBtn) advUpdateGeoBtn.disabled = true;
+    apiFetch('/api/geoip/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proxy: proxyVal })
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (t) { throw new Error(t || ('HTTP ' + resp.status)); });
+      }
+      return resp.json();
+    }).then(function (g) {
+      renderGeoStatus(g);
+      startGeoPolling();
+      showToast('已开始后台更新离线 IP 库…', 'ok');
+    }).catch(function (err) {
+      if (state.lastGeoState) renderGeoStatus(state.lastGeoState);
+      else {
+        if (updateGeoBtn) updateGeoBtn.disabled = false;
+        if (advUpdateGeoBtn) advUpdateGeoBtn.disabled = false;
+      }
+      if (err && err.status !== 401) {
+        showToast(err.message || '启动更新失败', 'warn');
+      }
+    });
+  }
+
+  if (updateGeoBtn) updateGeoBtn.addEventListener('click', triggerGeoUpdate);
+  if (advUpdateGeoBtn) advUpdateGeoBtn.addEventListener('click', triggerGeoUpdate);
+
   function loadStatus() {
     return apiFetch('/api/status').then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     }).then(function (st) {
+      if (st.geoip) {
+        renderGeoStatus(st.geoip);
+        if (st.geoip.updating) {
+          startGeoPolling();
+        }
+      }
       if (st.netEnv && st.netEnv.physicalInterface) {
         netEnvBadge.classList.remove('hidden');
         if (st.netEnv.tunDetected) {

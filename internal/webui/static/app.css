@@ -742,6 +742,94 @@ label.pill-check:has(input:checked) {
 }
 .check-row input { width: auto; accent-color: var(--primary); }
 
+/* 离线 IP 库状态与更新条 */
+.geo-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 11px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.geo-status-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.geo-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  background: var(--surface-sub);
+  color: var(--text-secondary);
+}
+.geo-mode-badge.is-offline {
+  background: var(--success-bg);
+  color: var(--success-fg);
+  border-color: var(--success-border);
+}
+.geo-mode-badge.is-hybrid {
+  background: var(--info-bg);
+  color: var(--info-fg);
+  border-color: var(--info-border);
+}
+.geo-mode-badge.is-online {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  border-color: var(--warning-border);
+}
+.geo-mode-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.geo-files-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.geo-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-sub);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.geo-file-chip.is-present {
+  color: var(--text-secondary);
+}
+.geo-file-chip.is-stale {
+  color: var(--warning-fg);
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+.geo-status-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.geo-attribution {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 /* 挑节点抽屉 */
 .picker-header {
   display: flex;

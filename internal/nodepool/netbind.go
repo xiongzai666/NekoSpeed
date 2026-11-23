@@ -199,7 +199,7 @@ func detectNetworkEnv() NetworkEnv {
 	return env
 }
 
-// IsFakeIPAddr 判断 IPv4 地址是否属于 Clash Fake-IP 网段（198.18.0.0/15）或无效保留地址。
+// IsFakeIPAddr 判断 IP 地址是否属于 Clash Fake-IP 网段（IPv4 198.18.0.0/15、IPv6 2001:2::/48 与 fc00::/7）或无效保留地址。
 func IsFakeIPAddr(a netip.Addr) bool {
 	a = a.Unmap()
 	if !a.IsValid() || a.IsUnspecified() || a.IsLoopback() {
@@ -209,6 +209,16 @@ func IsFakeIPAddr(a netip.Addr) bool {
 		b := a.As4()
 		// 198.18.0.0/15 (198.18.0.0 ~ 198.19.255.255)
 		if b[0] == 198 && (b[1] == 18 || b[1] == 19) {
+			return true
+		}
+	} else if a.Is6() {
+		b := a.As16()
+		// 2001:2::/48（RFC 5180，Clash Verge/mihomo 常用 IPv6 Fake-IP 段）
+		if b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x02 && b[4] == 0x00 && b[5] == 0x00 {
+			return true
+		}
+		// fc00::/7（RFC 4193 ULA，覆盖 mihomo/sing-box 默认 fake-ip-range6 fc00::/18 与 fd00::/8）
+		if b[0]&0xfe == 0xfc {
 			return true
 		}
 	}
@@ -236,10 +246,14 @@ func DialDirectContext(ctx context.Context, network, addr string) (net.Conn, err
 	return d.DialContext(ctx, network, addr)
 }
 
-// QueryADirect 通过绑定物理网卡向指定公共 DNS 查询 host 的真实 A 记录（自动过滤 198.18.0.0/15 Fake-IP）。
+// QueryADirect 通过绑定物理网卡向指定公共 DNS 查询 host 的真实 A 记录（自动过滤 Fake-IP）。
 func QueryADirect(ctx context.Context, server, host string) []netip.Addr {
+	return queryDNSDirect(ctx, server, host, dns.TypeA)
+}
+
+func queryDNSDirect(ctx context.Context, server, host string, qtype uint16) []netip.Addr {
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(host), dns.TypeA)
+	m.SetQuestion(dns.Fqdn(host), qtype)
 	m.RecursionDesired = true
 
 	// 优先尝试经物理网卡的 UDP 或 TCP DNS 查询；若检测到 TUN 开启，额外尝试 TCP 53 以防 UDP 53 被 dns-hijack 拦截。
@@ -280,12 +294,24 @@ func QueryADirect(ctx context.Context, server, host string) []netip.Addr {
 		}
 		var out []netip.Addr
 		for _, rr := range r.Answer {
-			if a, ok := rr.(*dns.A); ok {
-				if addr, ok2 := netip.AddrFromSlice(a.A); ok2 {
-					addr = addr.Unmap()
-					if !IsFakeIPAddr(addr) {
-						out = append(out, addr)
-					}
+			var ip net.IP
+			switch v := rr.(type) {
+			case *dns.A:
+				if qtype == dns.TypeA {
+					ip = v.A
+				}
+			case *dns.AAAA:
+				if qtype == dns.TypeAAAA {
+					ip = v.AAAA
+				}
+			}
+			if ip == nil {
+				continue
+			}
+			if addr, ok := netip.AddrFromSlice(ip); ok {
+				addr = addr.Unmap()
+				if !IsFakeIPAddr(addr) {
+					out = append(out, addr)
 				}
 			}
 		}
@@ -298,7 +324,7 @@ func QueryADirect(ctx context.Context, server, host string) []netip.Addr {
 
 // ResolveHostDirect 直连解析节点服务器域名为真实 IPv4/IPv6 地址，自动绕过 Fake-IP。
 func ResolveHostDirect(ctx context.Context, host string) string {
-	// 1. 先尝试系统解析，若返回的不是 198.18.0.0/15 Fake-IP 则直接采用
+	// 1. 先尝试系统解析，若返回的不是 Fake-IP 则直接采用
 	lctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	addrs, err := net.DefaultResolver.LookupIP(lctx, "ip", host)
 	cancel()
@@ -316,9 +342,14 @@ func ResolveHostDirect(ctx context.Context, host string) string {
 			}
 		}
 	}
-	// 2. 若系统解析被 Fake-IP 污染或失败，通过绑定物理网卡直查公共 DNS
+	// 2. 若系统解析被 Fake-IP 污染或失败，通过绑定物理网卡直查公共 DNS（优先 A 记录，兜底 AAAA 记录）
 	for _, srv := range preflightDNServers {
 		if ips := QueryADirect(ctx, srv, host); len(ips) > 0 {
+			return ips[0].String()
+		}
+	}
+	for _, srv := range preflightDNServers {
+		if ips := queryDNSDirect(ctx, srv, host, dns.TypeAAAA); len(ips) > 0 {
 			return ips[0].String()
 		}
 	}

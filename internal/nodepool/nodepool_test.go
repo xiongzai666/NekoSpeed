@@ -21,6 +21,16 @@ func TestIsFakeIP(t *testing.T) {
 		{"0.0.0.0", true},
 		{"1.1.1.1", false},
 		{"198.20.0.1", false},
+		{"2001:2::3af", true},
+		{"2001:2::1", true},
+		{"fc00::1", true},
+		{"fd12:3456::1", true},
+		{"::1", true},
+		{"::", true},
+		{"2602:fa4f:B00:50e7:3aed:dfa3:a813:5830", false},
+		{"2404:c140:2202::25:d6a", false},
+		{"2001:4860:4860::8888", false},
+		{"2001:db8::1", false},
 		{"not-an-ip", false},
 	}
 	for _, c := range cases {

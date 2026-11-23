@@ -186,3 +186,44 @@ func TestStaticAssetsServed(t *testing.T) {
 		}
 	}
 }
+
+func TestGeoIPStatusAndUpdateConflict(t *testing.T) {
+	t.Chdir(t.TempDir())
+	s := &server{hub: newHub()}
+	h := s.handler()
+
+	reqGeo := httptest.NewRequest(http.MethodGet, "/api/geoip/status", nil)
+	wGeo := httptest.NewRecorder()
+	h.ServeHTTP(wGeo, reqGeo)
+	if wGeo.Code != http.StatusOK {
+		t.Fatalf("GET /api/geoip/status code = %d, body = %s", wGeo.Code, wGeo.Body.String())
+	}
+	var geoResp struct {
+		Mode     string `json:"mode"`
+		Updating bool   `json:"updating"`
+		Files    []any  `json:"files"`
+	}
+	if err := json.Unmarshal(wGeo.Body.Bytes(), &geoResp); err != nil {
+		t.Fatal(err)
+	}
+	if geoResp.Mode != "online" || geoResp.Updating || len(geoResp.Files) == 0 {
+		t.Fatalf("unexpected /api/geoip/status payload: %+v", geoResp)
+	}
+
+	reqSt := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	wSt := httptest.NewRecorder()
+	h.ServeHTTP(wSt, reqSt)
+	if wSt.Code != http.StatusOK || !strings.Contains(wSt.Body.String(), `"geoip"`) {
+		t.Fatalf("GET /api/status missing geoip field: code=%d body=%s", wSt.Code, wSt.Body.String())
+	}
+
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+	reqUpd := httptest.NewRequest(http.MethodPost, "/api/geoip/update", strings.NewReader(`{}`))
+	wUpd := httptest.NewRecorder()
+	h.ServeHTTP(wUpd, reqUpd)
+	if wUpd.Code != http.StatusConflict {
+		t.Fatalf("运行中触发 /api/geoip/update 期望 409, 实际 %d", wUpd.Code)
+	}
+}

@@ -1,0 +1,86 @@
+name: Update GeoIP Databases
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-geoip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and validate MMDB databases
+        env:
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p geoip_release
+
+          curl -fsSL -o geoip_release/GeoCN.mmdb \
+            "https://github.com/ljxi/GeoCN/releases/latest/download/GeoCN.mmdb"
+          curl -fsSL -o geoip_release/GeoLite2-City.mmdb \
+            "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb"
+          curl -fsSL -o geoip_release/GeoLite2-ASN.mmdb \
+            "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb"
+
+          if [ -n "${IPINFO_TOKEN:-}" ]; then
+            if ! python3 - <<'PY'
+          import os, urllib.request
+          token = os.environ["IPINFO_TOKEN"].strip()
+          req = urllib.request.Request(
+              f"https://ipinfo.io/data/ipinfo_lite.mmdb?token={token}",
+              headers={"User-Agent": "NekoSpeed-CI/1.0"},
+          )
+          with urllib.request.urlopen(req, timeout=180) as r, open("geoip_release/ipinfo_lite.mmdb", "wb") as f:
+              while True:
+                  chunk = r.read(1 << 20)
+                  if not chunk:
+                      break
+                  f.write(chunk)
+          PY
+            then
+              echo "::warning::IPinfo Lite download failed; fallback to GeoLite2-ASN only"
+              rm -f geoip_release/ipinfo_lite.mmdb
+            fi
+          else
+            echo "::notice::IPINFO_TOKEN secret is not configured; publishing GeoCN + GeoLite2 only"
+          fi
+
+          python3 - <<'PY'
+          import pathlib, sys
+          marker = b"\xab\xcd\xefMaxMind.com"
+          files = sorted(pathlib.Path("geoip_release").glob("*.mmdb"))
+          assert files, "no mmdb files downloaded"
+          for p in files:
+              size = p.stat().st_size
+              with p.open("rb") as f:
+                  f.seek(max(0, size - 65536))
+                  tail = f.read()
+              if size < 1_000_000 or marker not in tail:
+                  if p.name == "ipinfo_lite.mmdb":
+                      print(f"::warning::{p.name} failed MMDB validation (size={size}), removing")
+                      p.unlink()
+                      continue
+                  sys.exit(f"Invalid MMDB file: {p.name} (size={size})")
+              print(f"Verified {p.name}: {size} bytes")
+          PY
+
+          (cd geoip_release && sha256sum *.mmdb > SHA256SUMS.txt)
+
+      - name: Publish geoip-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: geoip-latest
+          name: GeoIP Databases (Latest)
+          make_latest: false
+          body: |
+            Automated daily/weekly offline GeoIP MMDB bundle for NekoSpeed.
+
+            ### Included Databases
+            - `GeoCN.mmdb` (via [ljxi/GeoCN](https://github.com/ljxi/GeoCN))
+            - `ipinfo_lite.mmdb` (when `IPINFO_TOKEN` is configured; **IP address data powered by [IPinfo](https://ipinfo.io)** under CC BY-SA 4.0)
+            - `GeoLite2-City.mmdb` & `GeoLite2-ASN.mmdb` (via [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb), MaxMind GeoLite2 under CC BY-SA 4.0)
+          files: geoip_release/*

@@ -190,6 +190,7 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 		return nil, fmt.Errorf("初始化 GeoIP 失败: %w", err)
 	}
 	defer resolver.Close()
+	logf("GeoIP：%s", resolver.ModeSummary())
 
 	// 3. 并发测试：非带宽探测项按 Concurrency 并发执行，下载测速由独立 speedSem（容量 1）串行化，兼顾速度与准确性。
 	concurrency := o.Concurrency
