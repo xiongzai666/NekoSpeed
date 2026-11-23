@@ -63,6 +63,10 @@ func TestIsInfoNodeName(t *testing.T) {
 		"过滤掉 2 个超时节点",
 		"官网：https://example.com",
 		"最新网址发布页",
+		"到期: 2027-10-14",
+		"重置: 2026-12-14",
+		"获取: 2026-11-22 10:41:08",
+		"流量: 11.25 GB / 200 GB",
 	}
 	for _, name := range infoNames {
 		if !isInfoNodeName(name) {
@@ -71,8 +75,10 @@ func TestIsInfoNodeName(t *testing.T) {
 	}
 	realNames := []string{
 		"🇭🇰 香港1|1x",
+		"🇭🇰 香港-01",
 		"🇯🇵 日本IPLC-01",
 		"🇺🇸 美国BGP专线",
+		"🇸🇬 狮城 0.5x流量",
 	}
 	for _, name := range realNames {
 		if isInfoNodeName(name) {

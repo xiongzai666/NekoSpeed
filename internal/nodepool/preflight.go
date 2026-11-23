@@ -20,9 +20,15 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/trie"
 
 	"nekospeed/internal/model"
 )
+
+// ResetHosts 清空 mihomo 全局 DefaultHosts，避免 Web UI 常驻进程在多次测速间残留旧的预检 IP 映射。
+func ResetHosts() {
+	resolver.DefaultHosts = resolver.NewHosts(trie.New[resolver.HostValue]())
+}
 
 // PreflightTimeout 单个 IP:port 的 TCP 探测超时。
 // 需短于 GFW 封 IP 的典型黑洞表现（SYN 无回应），2s 足够区分。

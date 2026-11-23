@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"nekospeed/internal/model"
 )
@@ -99,5 +100,23 @@ func TestProbeIPsPartialPortSuccessAndRanking(t *testing.T) {
 	got := probeIPs(context.Background(), []netip.Addr{ipDead, ipOne, ipBoth}, []uint16{443, 8443})
 	if len(got) != 2 || got[0] != ipBoth || got[1] != ipOne {
 		t.Fatalf("probeIPs = %v, expected [%v %v]", got, ipBoth, ipOne)
+	}
+}
+
+func TestResetHosts(t *testing.T) {
+	t.Cleanup(ResetHosts)
+	hv, err := resolver.NewHostValueByIPs([]netip.Addr{netip.MustParseAddr("1.2.3.4")})
+	if err != nil {
+		t.Fatalf("NewHostValueByIPs: %v", err)
+	}
+	if err := resolver.DefaultHosts.Insert("stale-node.example.com", hv); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if _, ok := resolver.DefaultHosts.Search("stale-node.example.com", false); !ok {
+		t.Fatal("插入后应可命中 DefaultHosts")
+	}
+	ResetHosts()
+	if _, ok := resolver.DefaultHosts.Search("stale-node.example.com", false); ok {
+		t.Fatal("ResetHosts 后不应再命中残留条目")
 	}
 }

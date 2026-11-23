@@ -566,3 +566,204 @@ func TestSetProxyInvalid(t *testing.T) {
 		t.Fatalf("恢复默认代理不应报错: %v", err)
 	}
 }
+
+func TestParseClashHostsMapping(t *testing.T) {
+	yamlText := `proxies:
+  - name: "hosts-mapped-anytls"
+    type: anytls
+    server: decoy-entry.example.net
+    port: 14981
+    password: pw
+    sni: cdn-asset.example.com
+  - name: "exact-over-wild"
+    type: trojan
+    server: exact.wild.test
+    port: 443
+    password: pw
+  - name: "single-star"
+    type: anytls
+    server: one.wild.test
+    port: 443
+    password: pw
+  - name: "multi-dot"
+    type: vless
+    server: a.b.wild.test
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    tls: true
+  - name: "plus-root"
+    type: vless
+    server: wild.test
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    tls: false
+  - name: "chain-node"
+    type: ss
+    server: hop-a.test
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+  - name: "fixed-point-wild"
+    type: trojan
+    server: edge.fp.test
+    port: 443
+    password: pw
+  - name: "cycle-node"
+    type: trojan
+    server: loop1.test
+    port: 443
+    password: pw
+  - name: "iplist-node"
+    type: ss
+    server: list.test
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+  - name: "bad-dhcp"
+    type: ss
+    server: dhcp.test
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+  - name: "bad-system"
+    type: ss
+    server: sys.test
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+hosts:
+  decoy-entry.example.net: real-entry.example.net
+  exact.wild.test: exact-target.test
+  "*.wild.test": single-target.test
+  ".wild.test": dot-target.test
+  "+.wild.test": plus-target.test
+  hop-a.test: hop-b.test
+  hop-b.test: hop-c.test
+  "+.fp.test": real.fp.test
+  loop1.test: loop2.test
+  loop2.test: loop1.test
+  list.test: ["2001:db8::1", "1.2.3.4", "5.6.7.8"]
+  dhcp.test: "dhcp://eth0"
+  sys.test: "system"
+`
+
+	nodes, err := parse([]byte(yamlText), 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	byName := make(map[string]map[string]any, len(nodes))
+	nodeByName := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		byName[n.Name] = n.Raw
+		nodeByName[n.Name] = n.Server
+		if n.Raw["server"] != n.Server {
+			t.Fatalf("节点 %q Raw[server]=%v 与 Server=%q 不一致", n.Name, n.Raw["server"], n.Server)
+		}
+	}
+
+	// 1. 域名 -> 域名主机映射，且保留已有 sni 不覆盖
+	if got := nodeByName["hosts-mapped-anytls"]; got != "real-entry.example.net" {
+		t.Errorf("hosts-mapped-anytls server = %q, want real-entry.example.net", got)
+	}
+	if got := byName["hosts-mapped-anytls"]["sni"]; got != "cdn-asset.example.com" {
+		t.Errorf("hosts-mapped-anytls 已有 sni 被覆盖: %v", got)
+	}
+
+	// 2. 精确 > *. > . / +. 优先级
+	if got := nodeByName["exact-over-wild"]; got != "exact-target.test" {
+		t.Errorf("exact-over-wild = %q, want exact-target.test", got)
+	}
+	if got := byName["exact-over-wild"]["sni"]; got != "exact.wild.test" {
+		t.Errorf("trojan 无显式 sni 时应保留原域名作 sni: %v", got)
+	}
+	if got := nodeByName["single-star"]; got != "single-target.test" {
+		t.Errorf("single-star = %q, want single-target.test", got)
+	}
+	if got := byName["single-star"]["sni"]; got != "one.wild.test" {
+		t.Errorf("anytls 无显式 sni 时应保留原域名作 sni: %v", got)
+	}
+	if got := nodeByName["multi-dot"]; got != "dot-target.test" {
+		t.Errorf("multi-dot = %q, want dot-target.test", got)
+	}
+	if got := byName["multi-dot"]["servername"]; got != "a.b.wild.test" {
+		t.Errorf("vless tls=true 且无 servername 时应保留原域名: %v", got)
+	}
+	if got := nodeByName["plus-root"]; got != "plus-target.test" {
+		t.Errorf("plus-root = %q, want plus-target.test", got)
+	}
+	if _, has := byName["plus-root"]["servername"]; has {
+		t.Errorf("vless tls=false 不应注入 servername: %v", byName["plus-root"])
+	}
+
+	// 3. 链式跳转与通配符不动点，以及 ss 不注入 SNI
+	if got := nodeByName["chain-node"]; got != "hop-c.test" {
+		t.Errorf("chain-node = %q, want hop-c.test", got)
+	}
+	if _, hasSni := byName["chain-node"]["sni"]; hasSni {
+		t.Errorf("ss 不应注入 sni: %v", byName["chain-node"])
+	}
+	if got := nodeByName["fixed-point-wild"]; got != "real.fp.test" {
+		t.Errorf("fixed-point-wild = %q, want real.fp.test", got)
+	}
+
+	// 4. 环路保护回退原域名
+	if got := nodeByName["cycle-node"]; got != "loop1.test" {
+		t.Errorf("cycle-node = %q, want loop1.test", got)
+	}
+	if _, hasSni := byName["cycle-node"]["sni"]; hasSni {
+		t.Errorf("未发生改写时不应注入 sni: %v", byName["cycle-node"])
+	}
+
+	// 5. IP 列表优先 IPv4，以及过滤非法目标值
+	if got := nodeByName["iplist-node"]; got != "1.2.3.4" {
+		t.Errorf("iplist-node = %q, want 1.2.3.4", got)
+	}
+	if got := nodeByName["bad-dhcp"]; got != "dhcp.test" {
+		t.Errorf("bad-dhcp = %q, want dhcp.test", got)
+	}
+	if got := nodeByName["bad-system"]; got != "sys.test" {
+		t.Errorf("bad-system = %q, want sys.test", got)
+	}
+}
+
+func TestShouldFallbackDirectPhysical(t *testing.T) {
+	if err := SetProxy(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetProxy("") })
+
+	noEnvProxy := func(*http.Request) (*url.URL, error) { return nil, nil }
+	withEnvProxy := func(*http.Request) (*url.URL, error) {
+		return url.Parse("http://127.0.0.1:7890")
+	}
+
+	if shouldFallbackDirectPhysical("https://api.example.com/sub", false, noEnvProxy) {
+		t.Error("未检测到 TUN 时不应触发物理网卡直连回退")
+	}
+	if !shouldFallbackDirectPhysical("https://api.example.com/sub", true, noEnvProxy) {
+		t.Error("TUN 开启且未配代理的公网地址应允许物理网卡直连回退")
+	}
+	if shouldFallbackDirectPhysical("http://127.0.0.1:8080/sub", true, noEnvProxy) {
+		t.Error("127.0.0.1 回环地址不应回退")
+	}
+	if shouldFallbackDirectPhysical("http://localhost:8080/sub", true, noEnvProxy) {
+		t.Error("localhost 不应回退")
+	}
+	if shouldFallbackDirectPhysical("http://[::1]:8080/sub", true, noEnvProxy) {
+		t.Error("::1 回环地址不应回退")
+	}
+
+	if err := SetProxy("http://127.0.0.1:7890"); err != nil {
+		t.Fatal(err)
+	}
+	if shouldFallbackDirectPhysical("https://api.example.com/sub", true, noEnvProxy) {
+		t.Error("显式配置 -proxy 时不应绕过代理直连")
+	}
+	if err := SetProxy(""); err != nil {
+		t.Fatal(err)
+	}
+
+	if shouldFallbackDirectPhysical("https://api.example.com/sub", true, withEnvProxy) {
+		t.Error("命中环境变量代理时不应绕过代理直连")
+	}
+}

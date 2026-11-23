@@ -58,6 +58,22 @@ func TestMihomoParseClash(t *testing.T) {
     tls: true
     ws-opts:
       path: /ray
+  - name: hosts-mapped-anytls
+    type: anytls
+    server: decoy-entry.example.net
+    port: 14981
+    password: pw
+    sni: oss.example.com
+    skip-cert-verify: true
+    udp: true
+  - name: mapped-trojan-no-sni
+    type: trojan
+    server: decoy-tj.example.net
+    port: 443
+    password: pw
+hosts:
+  decoy-entry.example.net: real-entry.example.net
+  decoy-tj.example.net: 203.0.113.10
 `
 	nodes, err := parse([]byte(yamlText), 0)
 	if err != nil {

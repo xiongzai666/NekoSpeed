@@ -175,8 +175,9 @@ func Run(ctx context.Context, o Options, logf func(format string, args ...any)) 
 	}
 	logf("共 %d 个节点，测试项：%s", len(nodes), strings.Join(testSet, ","))
 
-	// 1.5 服务器 IP 预检：DDNS 轮换 IP 池中可能混有被封锁的死 IP，
-	// 探测出当前可达 IP 钉入 mihomo DefaultHosts，避免拨号随机选中死 IP。
+	// 1.5 服务器 IP 预检：每次测试前先清空上次残留的 DefaultHosts；
+	// DDNS 轮换 IP 池中可能混有被封锁的死 IP，探测出当前可达 IP 钉入 mihomo DefaultHosts，避免拨号随机选中死 IP。
+	nodepool.ResetHosts()
 	if o.Preflight {
 		if s := nodepool.FormatPreflightLog(nodepool.PreflightServers(ctx, nodes)); s != "" {
 			logf("%s", s)
@@ -426,7 +427,7 @@ func testNode(ctx context.Context, node model.Node, r *model.NodeResult, testSet
 	}
 }
 
-var infoNodeRe = regexp.MustCompile(`(?i)(剩余流量|套餐到期|到期时间|有效期限|官网|新网址|备用网址|最新网址|群组|频道|公告|过滤掉|流量重置|重置剩余|距离下次重置|请更新订阅)`)
+var infoNodeRe = regexp.MustCompile(`(?i)(^\s*(到期|重置|获取|流量|过期|剩余)\s*[:：]|剩余流量|套餐到期|到期时间|有效期限|官网|新网址|备用网址|最新网址|群组|频道|公告|过滤掉|流量重置|重置剩余|距离下次重置|请更新订阅)`)
 
 // isInfoNodeName 判断节点名是否为机场常见的非代理提示类伪节点。
 func isInfoNodeName(name string) bool {

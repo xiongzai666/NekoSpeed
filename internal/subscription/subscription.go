@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"nekospeed/internal/model"
+	"nekospeed/internal/nodepool"
 )
 
 // defaultUserAgent 拉取订阅时使用的 UA。Clash 机场面板通常按 UA 下发 clash 配置，
@@ -36,11 +38,14 @@ const fetchRetry = 3
 // maxBody 订阅内容大小上限（16 MiB），防止异常响应撑爆内存。
 const maxBody = 16 << 20
 
-// proxyMu 保护 proxyFn，允许运行时通过 SetProxy 覆盖。
+// proxyMu 保护 proxyFn 与 explicitProxy，允许运行时通过 SetProxy 覆盖。
 var proxyMu sync.RWMutex
 
 // proxyFn 决定订阅请求使用的代理，默认读取 HTTP_PROXY / HTTPS_PROXY 等环境变量。
 var proxyFn = http.ProxyFromEnvironment
+
+// explicitProxy 标记是否通过 SetProxy 显式设置了代理。
+var explicitProxy bool
 
 // SetProxy 设置订阅拉取使用的代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）。
 // 传空字符串恢复为默认的环境变量代理。订阅域名被 DNS 污染 / SNI 重置时通常需要走代理拉取。
@@ -48,6 +53,7 @@ func SetProxy(proxy string) error {
 	if proxy == "" {
 		proxyMu.Lock()
 		proxyFn = http.ProxyFromEnvironment
+		explicitProxy = false
 		proxyMu.Unlock()
 		return nil
 	}
@@ -62,6 +68,7 @@ func SetProxy(proxy string) error {
 	}
 	proxyMu.Lock()
 	proxyFn = http.ProxyURL(u)
+	explicitProxy = true
 	proxyMu.Unlock()
 	return nil
 }
@@ -105,17 +112,23 @@ func Load(source string) ([]model.Node, string, error) {
 
 // fetch HTTP GET 拉取订阅内容，返回响应体与响应头。
 // 失败时自动重试 fetchRetry 次；第二次起降级到 HTTP/1.1，避免部分机场对 HTTP/2 或 TLS fingerprint 的风控。
+// 若在本机 TUN 开启且未显式指定代理时遭遇 403，回退至绑定物理网卡直连拉取以绕过部分机场的海外 IP 拦截。
 func fetch(targetURL string) ([]byte, http.Header, error) {
 	var (
-		lastErr error
-		data    []byte
-		header  http.Header
+		lastErr        error
+		data           []byte
+		header         http.Header
+		statusCode     int
+		directPhysical bool
 	)
 	for attempt := 0; attempt < fetchRetry; attempt++ {
 		forceHTTP11 := attempt > 0
-		data, header, lastErr = fetchOnce(targetURL, forceHTTP11)
+		data, header, statusCode, lastErr = fetchOnce(targetURL, forceHTTP11, directPhysical)
 		if lastErr == nil {
 			return data, header, nil
+		}
+		if !directPhysical && statusCode == http.StatusForbidden && shouldFallbackDirectPhysical(targetURL, nodepool.GetNetworkEnv().TUNDetected, http.ProxyFromEnvironment) {
+			directPhysical = true
 		}
 		if attempt < fetchRetry-1 {
 			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
@@ -124,7 +137,37 @@ func fetch(targetURL string) ([]byte, http.Header, error) {
 	return nil, nil, lastErr
 }
 
-func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) {
+func shouldFallbackDirectPhysical(targetURL string, tunDetected bool, envProxyFn func(*http.Request) (*url.URL, error)) bool {
+	if !tunDetected {
+		return false
+	}
+	proxyMu.RLock()
+	hasExplicit := explicitProxy
+	proxyMu.RUnlock()
+	if hasExplicit {
+		return false
+	}
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	if envProxyFn != nil {
+		envProxy, err := envProxyFn(&http.Request{URL: u})
+		if err != nil || envProxy != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func fetchOnce(targetURL string, forceHTTP11, directPhysical bool) ([]byte, http.Header, int, error) {
 	proxyMu.RLock()
 	proxy := proxyFn
 	proxyMu.RUnlock()
@@ -133,6 +176,10 @@ func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) 
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 		},
+	}
+	if directPhysical {
+		transport.Proxy = nil
+		transport.DialContext = nodepool.DialDirectContext
 	}
 	if forceHTTP11 {
 		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
@@ -145,7 +192,7 @@ func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) 
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept", "application/json,text/plain,text/html,*/*")
@@ -156,11 +203,11 @@ func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) 
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("订阅请求返回 %s", resp.Status)
+		return nil, nil, resp.StatusCode, fmt.Errorf("订阅请求返回 %s", resp.Status)
 	}
 	// 请求头手动声明了 Accept-Encoding: gzip, deflate，net/http 不会自动解压，需按 Content-Encoding 自行解压。
 	reader := io.Reader(resp.Body)
@@ -168,23 +215,23 @@ func fetchOnce(targetURL string, forceHTTP11 bool) ([]byte, http.Header, error) 
 	case "gzip":
 		gr, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("解压 gzip 订阅响应失败: %w", err)
+			return nil, nil, resp.StatusCode, fmt.Errorf("解压 gzip 订阅响应失败: %w", err)
 		}
 		defer gr.Close()
 		reader = gr
 	case "deflate":
 		zr, err := zlib.NewReader(resp.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("解压 deflate 订阅响应失败: %w", err)
+			return nil, nil, resp.StatusCode, fmt.Errorf("解压 deflate 订阅响应失败: %w", err)
 		}
 		defer zr.Close()
 		reader = zr
 	}
 	data, err := io.ReadAll(io.LimitReader(reader, maxBody))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, resp.StatusCode, err
 	}
-	return data, resp.Header, nil
+	return data, resp.Header, resp.StatusCode, nil
 }
 
 // extractName 尝试从订阅来源、响应头或内容中提取订阅名称。
