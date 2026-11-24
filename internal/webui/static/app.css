@@ -442,6 +442,58 @@ button[aria-expanded="true"] .chevron-ico { transform: rotate(180deg); }
   line-height: 1.4;
 }
 
+/* Android VPN/代理提示横幅 */
+.android-vpn-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-panel);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.android-vpn-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 0;
+  font-weight: 500;
+}
+.android-vpn-msg .ico {
+  color: var(--warning-fg);
+  margin-top: 2px;
+}
+.android-vpn-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.android-vpn-banner .btn-secondary {
+  background: var(--surface);
+  border-color: var(--warning-border);
+  color: var(--text);
+}
+.android-vpn-banner .btn-secondary:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--warning-fg);
+}
+.android-vpn-banner .btn-ghost {
+  border-color: transparent;
+  color: var(--warning-fg);
+}
+.android-vpn-banner .btn-ghost:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--text);
+}
+
 /* 基础卡片面板（单一 1px 边框，无冗余阴影） */
 .panel {
   background: var(--surface);
@@ -2013,8 +2065,27 @@ body.topo-resizing * {
 }
 
 @media (max-width: 680px) {
-  .container { padding: 16px 14px 48px; }
+  .container {
+    padding: 16px max(14px, env(safe-area-inset-right)) max(48px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+  }
   .panel { padding: 14px 15px; }
+  .android-vpn-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .android-vpn-actions .btn { min-height: 36px; }
+  .env-geo-popover,
+  .history-popover {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: 60px;
+    width: auto;
+    max-width: none;
+    max-height: 75vh;
+    overflow-y: auto;
+  }
+  .history-popover-head { flex-wrap: wrap; }
   .launch-input-row { flex-direction: column; align-items: stretch; }
   .launch-actions {
     display: grid;
@@ -2026,13 +2097,39 @@ body.topo-resizing * {
   .workspace-left, .workspace-right { width: 100%; justify-content: space-between; }
   .history-picker-wrap { flex: 1; min-width: 0; }
   .history-trigger { width: 100%; max-width: none; }
+  .gallery-toolbar { align-items: stretch; }
+  .gallery-pills { width: 100%; }
+  .gallery-pills .chip-btn { min-height: 36px; }
+  .gallery-actions { width: 100%; }
+  .gallery-actions .btn {
+    min-height: 36px;
+    flex: 1 1 auto;
+  }
   .table-search-wrap { max-width: none; width: 100%; }
+  .table-wrap { -webkit-overflow-scrolling: touch; }
   .rerender-drawer select,
   .rerender-drawer input[type="text"] {
     width: 100%;
     min-width: 0;
   }
   .picker-title-group input { width: 100%; }
+  .lb-toolbar {
+    padding: max(10px, env(safe-area-inset-top)) 12px 10px;
+    align-items: stretch;
+  }
+  .lb-title {
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lb-controls { width: 100%; }
+  .lb-controls .btn { min-height: 36px; }
+  .lb-stage {
+    padding: 12px;
+    touch-action: pan-x pan-y pinch-zoom;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 
 @media (max-width: 540px) {

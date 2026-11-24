@@ -1,10 +1,10 @@
 import java.io.FileInputStream
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 val keystoreProperties = Properties().apply {
@@ -14,25 +14,77 @@ val keystoreProperties = Properties().apply {
     }
 }
 
+val propStoreFile = keystoreProperties.getProperty("storeFile")?.trim().orEmpty()
+val propStorePass = keystoreProperties.getProperty("storePassword").orEmpty()
+val propKeyAlias = keystoreProperties.getProperty("keyAlias")?.trim().orEmpty()
+val propKeyPass = keystoreProperties.getProperty("keyPassword").orEmpty()
+
+val envStorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.trim().orEmpty()
+val envStorePass = System.getenv("ANDROID_KEYSTORE_PASSWORD").orEmpty()
+val envKeyAlias = System.getenv("ANDROID_KEY_ALIAS")?.trim().orEmpty()
+val envKeyPass = System.getenv("ANDROID_KEY_PASSWORD").orEmpty()
+
+val hasPropSigning = propStoreFile.isNotEmpty() &&
+    propStorePass.isNotEmpty() &&
+    propKeyAlias.isNotEmpty() &&
+    propKeyPass.isNotEmpty() &&
+    rootProject.file(propStoreFile).exists()
+
+val hasEnvSigning = envStorePath.isNotEmpty() &&
+    envStorePass.isNotEmpty() &&
+    envKeyAlias.isNotEmpty() &&
+    envKeyPass.isNotEmpty() &&
+    file(envStorePath).exists()
+
+val hasReleaseSigning = hasPropSigning || hasEnvSigning
+
+val configuredAbiFilters = (findProperty("abiFilters") as? String)
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.takeIf { it.isNotEmpty() }
+    ?: listOf("arm64-v8a")
+
+val configuredVersionCode = (findProperty("versionCode") as? String)
+    ?.trim()
+    ?.toIntOrNull()
+    ?: 3
+
+val configuredVersionName = (findProperty("versionName") as? String)
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?: "0.3.0"
+
 android {
     namespace = "com.nekospeed.android"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.nekospeed.android"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        targetSdk = 35
+        versionCode = configuredVersionCode
+        versionName = configuredVersionName
+
+        ndk {
+            abiFilters.addAll(configuredAbiFilters)
+        }
     }
 
     signingConfigs {
-        create("release") {
-            if (keystoreProperties.isNotEmpty()) {
-                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
+        if (hasReleaseSigning) {
+            create("release") {
+                if (hasPropSigning) {
+                    storeFile = rootProject.file(propStoreFile)
+                    storePassword = propStorePass
+                    keyAlias = propKeyAlias
+                    keyPassword = propKeyPass
+                } else {
+                    storeFile = file(envStorePath)
+                    storePassword = envStorePass
+                    keyAlias = envKeyAlias
+                    keyPassword = envKeyPass
+                }
             }
         }
     }
@@ -45,16 +97,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
-    }
-
-    buildFeatures {
-        compose = true
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
     }
 
     compileOptions {
@@ -62,38 +110,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
-    implementation(composeBom)
-
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.activity:activity-compose:1.8.2")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
-
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
-
-    implementation("io.coil-kt:coil-compose:2.5.0")
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-ktx:1.9.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
-
-    debugImplementation("androidx.compose.ui:ui-tooling")
 }

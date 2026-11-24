@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NekoSpeed · 节点测速与解锁分析控制台</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -42,6 +42,7 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></symbol>
     <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
   </defs>
 </svg>
 
@@ -115,6 +116,18 @@
   </header>
 
   <main>
+    <!-- Android VPN/代理提示横幅（检测到本机活跃 VPN 时显示） -->
+    <div class="android-vpn-banner hidden" id="androidVpnBanner" role="status" aria-live="polite">
+      <div class="android-vpn-msg">
+        <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg>
+        <span>检测到本机正在运行 VPN 或代理服务，测速流量与解锁结果可能失真。建议先关闭后再开始测试。</span>
+      </div>
+      <div class="android-vpn-actions">
+        <button type="button" class="btn btn-secondary btn-xs" id="recheckVpnBtn">重新检测</button>
+        <button type="button" class="btn btn-ghost btn-xs" id="dismissVpnBtn">忽略</button>
+      </div>
+    </div>
+
     <!-- 单焦点启动台 -->
     <section class="panel launchpad" id="launchCard" aria-label="测试任务配置">
       <div class="launchpad-head">
@@ -468,6 +481,10 @@
                 <svg class="ico"><use href="#i-download"/></svg>
                 <span>下载 PNG</span>
               </a>
+              <button type="button" class="btn btn-secondary btn-sm hidden" id="galleryShareBtn">
+                <svg class="ico"><use href="#i-share"/></svg>
+                <span>分享</span>
+              </button>
               <button type="button" class="btn btn-secondary btn-sm" id="galleryFullscreenBtn">
                 <svg class="ico"><use href="#i-maximize"/></svg>
                 <span>全屏</span>
@@ -666,6 +683,10 @@
         <svg class="ico"><use href="#i-download"/></svg>
         <span>下载原图</span>
       </a>
+      <button type="button" class="btn btn-dark-ghost btn-sm hidden" id="lbShareBtn">
+        <svg class="ico"><use href="#i-share"/></svg>
+        <span>分享</span>
+      </button>
       <button type="button" class="btn btn-danger btn-sm" id="lbCloseBtn" aria-label="关闭预览">
         <svg class="ico"><use href="#i-x"/></svg>
         <span>关闭</span>

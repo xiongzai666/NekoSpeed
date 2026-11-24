@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -433,5 +434,30 @@ func TestHistoryCacheAndInvalidation(t *testing.T) {
 	s.histMu.Unlock()
 	if exists {
 		t.Fatal("删除历史记录后缓存仍残留")
+	}
+}
+
+func TestOutBaseDirEnvAndStatusPlatform(t *testing.T) {
+	t.Chdir(t.TempDir())
+	customOut := filepath.Join(t.TempDir(), "android-out")
+	t.Setenv("NEKOSPEED_OUT_DIR", customOut)
+	if got := outBaseDir(); got != customOut {
+		t.Fatalf("outBaseDir() = %q, 期望 %q", got, customOut)
+	}
+
+	s := &server{hub: newHub()}
+	w := httptest.NewRecorder()
+	s.handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/status code = %d", w.Code)
+	}
+	var st struct {
+		Platform string `json:"platform"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Platform != runtime.GOOS {
+		t.Fatalf("GET /api/status platform = %q, 期望 %q", st.Platform, runtime.GOOS)
 	}
 }

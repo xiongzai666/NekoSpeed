@@ -273,3 +273,21 @@ func TestFooterTimeDynamicTimezone(t *testing.T) {
 		t.Fatalf("非 CST 时区不应硬编码 (CST), 实际 %q", got)
 	}
 }
+
+func TestLoadFontEnvFallbackAndCacheKey(t *testing.T) {
+	missingEnvFont := t.TempDir() + "/missing-env-font.otf"
+	t.Setenv("NEKOSPEED_FONT_PATH", missingEnvFont)
+	fEnv, err := loadFont("")
+	if err != nil {
+		t.Skipf("无可用系统字体: %v", err)
+	}
+	if fEnv == nil {
+		t.Fatal("NEKOSPEED_FONT_PATH 无效时应回退到系统字体，返回非 nil")
+	}
+	book.mu.Lock()
+	_, cachedUnderEnvKey := book.fonts[missingEnvFont]
+	book.mu.Unlock()
+	if !cachedUnderEnvKey {
+		t.Fatalf("期望缓存键包含 NEKOSPEED_FONT_PATH=%q", missingEnvFont)
+	}
+}

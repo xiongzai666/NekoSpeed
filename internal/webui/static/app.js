@@ -44,6 +44,10 @@
   var customModulesBtn = el('customModulesBtn');
   var testsRow = el('tests');
 
+  var androidVpnBanner = el('androidVpnBanner');
+  var recheckVpnBtn = el('recheckVpnBtn');
+  var dismissVpnBtn = el('dismissVpnBtn');
+
   var launchCard = el('launchCard');
   var sourceInput = el('source');
   var clearSourceBtn = el('clearSourceBtn');
@@ -98,6 +102,7 @@
   var galleryTypePills = el('galleryTypePills');
   var galleryCopyBtn = el('galleryCopyBtn');
   var galleryDownloadBtn = el('galleryDownloadBtn');
+  var galleryShareBtn = el('galleryShareBtn');
   var galleryFullscreenBtn = el('galleryFullscreenBtn');
   var toggleRerenderBtn = el('toggleRerenderBtn');
   var rerenderDrawer = el('rerenderDrawer');
@@ -118,6 +123,7 @@
   var lbZoomLabel = el('lbZoomLabel');
   var lbZoomToggleBtn = el('lbZoomToggleBtn');
   var lbDownloadBtn = el('lbDownloadBtn');
+  var lbShareBtn = el('lbShareBtn');
   var lbCopyBtn = el('lbCopyBtn');
   var lbCloseBtn = el('lbCloseBtn');
   var lbPrevBtn = el('lbPrevBtn');
@@ -175,7 +181,9 @@
     envPopoverPinned: false,
     envHoverTimer: null,
     availableThemes: null,
-    customModulesManuallyOpen: false
+    customModulesManuallyOpen: false,
+    platform: '',
+    vpnBannerDismissed: false
   };
 
   var PRESET_MAP = {
@@ -276,8 +284,60 @@
     }, 2800);
   }
 
+  function androidBridge() {
+    return (typeof window !== 'undefined' && window.NekoAndroid) ? window.NekoAndroid : null;
+  }
+
+  function decodeUrlSegment(seg) {
+    try {
+      return decodeURIComponent(seg || '');
+    } catch (e) {
+      return seg || '';
+    }
+  }
+
+  function parseFileRef(urlStr, fallbackName) {
+    var raw = String(urlStr || '').trim();
+    var pathname = raw;
+    if (raw) {
+      try {
+        pathname = new URL(raw, window.location.origin).pathname || '';
+      } catch (e) {
+        pathname = raw.split('#')[0].split('?')[0];
+      }
+    }
+    pathname = pathname.split('#')[0].split('?')[0];
+    var mTwo = pathname.match(/\/files\/([^/]+)\/([^/]+)$/);
+    if (mTwo) {
+      return {
+        runId: decodeUrlSegment(mTwo[1]) || state.currentRunId || '',
+        name: decodeUrlSegment(mTwo[2]) || fallbackName || ''
+      };
+    }
+    var mOne = pathname.match(/\/files\/([^/]+)$/);
+    if (mOne) {
+      return {
+        runId: state.currentRunId || '',
+        name: decodeUrlSegment(mOne[1]) || fallbackName || ''
+      };
+    }
+    return {
+      runId: state.currentRunId || '',
+      name: fallbackName || ''
+    };
+  }
+
   function copyText(text, successMsg) {
     var value = String(text || '');
+    var bridge = androidBridge();
+    if (bridge && typeof bridge.copyText === 'function') {
+      try {
+        if (bridge.copyText(value)) {
+          showToast(successMsg || '已复制到剪贴板', 'ok');
+          return;
+        }
+      } catch (e) {}
+    }
     function fallbackCopy() {
       try {
         var ta = document.createElement('textarea');
@@ -410,6 +470,10 @@
       requestAnimationFrame(function () {
         root.classList.remove('theme-switching');
       });
+    }
+    var bridge = androidBridge();
+    if (bridge && typeof bridge.onThemeChanged === 'function') {
+      try { bridge.onThemeChanged(mode === 'dark'); } catch (e) {}
     }
   }
 
@@ -868,6 +932,12 @@
   });
 
   // 6. 挑节点预览与勾选器
+  function closeNodePickerDrawer() {
+    if (!nodePickerDrawer) return;
+    nodePickerDrawer.classList.add('hidden');
+    if (previewNodesBtn) previewNodesBtn.setAttribute('aria-expanded', 'false');
+  }
+
   function resetNodePickerSelection() {
     state.nodePickerActive = false;
     state.selectedIndicesSet.clear();
@@ -880,8 +950,7 @@
     field.addEventListener(id === 'skipInfo' ? 'change' : 'input', function () {
       if (state.nodePickerActive || !nodePickerDrawer.classList.contains('hidden')) {
         resetNodePickerSelection();
-        nodePickerDrawer.classList.add('hidden');
-        previewNodesBtn.setAttribute('aria-expanded', 'false');
+        closeNodePickerDrawer();
       }
     });
   });
@@ -1015,10 +1084,7 @@
     state.nodePickerActive = true;
     renderPickerGrid();
   });
-  el('pickerCloseBtn').addEventListener('click', function () {
-    nodePickerDrawer.classList.add('hidden');
-    previewNodesBtn.setAttribute('aria-expanded', 'false');
-  });
+  el('pickerCloseBtn').addEventListener('click', closeNodePickerDrawer);
 
   // 7. 参数持久化与恢复
   function savePrefs() {
@@ -1098,7 +1164,7 @@
   resetPrefsBtn.addEventListener('click', function () {
     el('threads').value = 8;
     el('duration').value = 10;
-    el('concurrency').value = 6;
+    el('concurrency').value = (state.platform === 'android') ? 4 : 6;
     el('pingCount').value = 4;
     el('maxMB').value = 0;
     el('sortBy').value = '';
@@ -1183,6 +1249,10 @@
     }
     if (state.lastGeoState) renderGeoStatus(state.lastGeoState);
     if (state.historyPopoverOpen) renderHistoryList();
+    var bridge = androidBridge();
+    if (bridge && typeof bridge.onRunningStateChanged === 'function') {
+      try { bridge.onRunningStateChanged(Boolean(running)); } catch (e) {}
+    }
   }
 
   function appendLog(line) {
@@ -1817,6 +1887,7 @@
       thumbs.innerHTML = '<div class="gallery-placeholder">暂无可展示的 PNG 结果图</div>';
       galleryCopyBtn.disabled = true;
       galleryFullscreenBtn.disabled = true;
+      if (galleryShareBtn) galleryShareBtn.disabled = true;
       galleryDownloadBtn.classList.add('hidden');
       return;
     }
@@ -1832,6 +1903,7 @@
 
     galleryCopyBtn.disabled = false;
     galleryFullscreenBtn.disabled = false;
+    if (galleryShareBtn) galleryShareBtn.disabled = false;
     galleryDownloadBtn.href = item.url;
     galleryDownloadBtn.setAttribute('download', item.name);
     galleryDownloadBtn.classList.remove('hidden');
@@ -1901,10 +1973,88 @@
     }
   }
 
+  function handleAndroidSaveImage(urlStr, fallbackName) {
+    var bridge = androidBridge();
+    if (!bridge || typeof bridge.saveImageToGallery !== 'function') {
+      showToast('保存失败：当前环境不支持保存到相册', 'err');
+      return;
+    }
+    var ref = parseFileRef(urlStr, fallbackName);
+    if (!ref.name) {
+      showToast('保存失败：未找到有效图片文件', 'err');
+      return;
+    }
+    var res = '';
+    try {
+      res = String(bridge.saveImageToGallery(ref.runId || '', ref.name) || '');
+    } catch (err) {
+      showToast('保存失败：' + ((err && err.message) || String(err)), 'err');
+      return;
+    }
+    if (res === 'saved') {
+      showToast('已保存到相册 Pictures/NekoSpeed', 'ok');
+    } else if (res === 'shared') {
+      showToast('已调起系统分享保存', 'ok');
+    } else {
+      var errMsg = res.indexOf('error:') === 0 ? res.slice(6) : (res || '未知错误');
+      showToast('保存失败：' + errMsg, 'err');
+    }
+  }
+
+  function handleAndroidShareFile(urlStr, fallbackName) {
+    var bridge = androidBridge();
+    if (!bridge || typeof bridge.shareFile !== 'function') {
+      showToast('分享失败：当前环境不支持系统分享', 'err');
+      return;
+    }
+    var ref = parseFileRef(urlStr, fallbackName);
+    if (!ref.name) {
+      showToast('分享失败：未找到可分享的文件', 'err');
+      return;
+    }
+    try {
+      if (!bridge.shareFile(ref.runId || '', ref.name)) {
+        showToast('分享文件失败', 'err');
+      }
+    } catch (err) {
+      showToast('分享失败：' + ((err && err.message) || String(err)), 'err');
+    }
+  }
+
   galleryCopyBtn.addEventListener('click', function () {
     var item = state.galleryList[state.activeGalleryIdx];
     if (item) copyImageToClipboard(item.url, galleryCopyBtn);
   });
+
+  if (galleryDownloadBtn) {
+    galleryDownloadBtn.addEventListener('click', function (e) {
+      if (!androidBridge()) return;
+      e.preventDefault();
+      var item = state.galleryList[state.activeGalleryIdx];
+      handleAndroidSaveImage(
+        (item && item.url) || galleryDownloadBtn.getAttribute('href') || '',
+        (item && item.name) || galleryDownloadBtn.getAttribute('download') || ''
+      );
+    });
+  }
+
+  if (galleryShareBtn) {
+    galleryShareBtn.addEventListener('click', function (e) {
+      if (!androidBridge()) return;
+      e.preventDefault();
+      var item = state.galleryList[state.activeGalleryIdx];
+      if (!item) return;
+      handleAndroidShareFile(item.url, item.name);
+    });
+  }
+
+  if (jsonLink) {
+    jsonLink.addEventListener('click', function (e) {
+      if (!androidBridge()) return;
+      e.preventDefault();
+      handleAndroidShareFile(jsonLink.getAttribute('href') || jsonLink.href || '', '');
+    });
+  }
 
   galleryFullscreenBtn.addEventListener('click', function () {
     if (state.galleryList.length) openLightbox(state.activeGalleryIdx);
@@ -1998,11 +2148,26 @@
         mediaStr, aiStr, n.error || ''
       ].map(csvCell).join(','));
     });
-    var blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var csvFilename = 'nekospeed_' + (state.currentRunId || 'nodes') + '.csv';
+    var csvContent = '\uFEFF' + lines.join('\r\n');
+    var bridge = androidBridge();
+    if (bridge && typeof bridge.exportCsv === 'function') {
+      try {
+        if (bridge.exportCsv(csvFilename, csvContent)) {
+          showToast('已导出 ' + rows.length + ' 条节点数据到 CSV', 'ok');
+        } else {
+          showToast('导出 CSV 失败', 'err');
+        }
+      } catch (err) {
+        showToast('导出 CSV 失败：' + ((err && err.message) || String(err)), 'err');
+      }
+      return;
+    }
+    var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     var a = document.createElement('a');
     var url = URL.createObjectURL(blob);
     a.href = url;
-    a.download = 'nekospeed_' + (state.currentRunId || 'nodes') + '.csv';
+    a.download = csvFilename;
     a.click();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     showToast('已导出 ' + rows.length + ' 条节点数据到 CSV', 'ok');
@@ -2232,6 +2397,26 @@
   lbCopyBtn.addEventListener('click', function () {
     if (state.galleryList[state.lbIndex]) copyImageToClipboard(state.galleryList[state.lbIndex].url, lbCopyBtn);
   });
+  if (lbDownloadBtn) {
+    lbDownloadBtn.addEventListener('click', function (e) {
+      if (!androidBridge()) return;
+      e.preventDefault();
+      var item = state.galleryList[state.lbIndex];
+      handleAndroidSaveImage(
+        (item && item.url) || lbDownloadBtn.getAttribute('href') || '',
+        (item && item.name) || lbDownloadBtn.getAttribute('download') || ''
+      );
+    });
+  }
+  if (lbShareBtn) {
+    lbShareBtn.addEventListener('click', function (e) {
+      if (!androidBridge()) return;
+      e.preventDefault();
+      var item = state.galleryList[state.lbIndex];
+      if (!item) return;
+      handleAndroidShareFile(item.url, item.name);
+    });
+  }
 
   document.addEventListener('keydown', function (e) {
     if (lightbox.classList.contains('open')) {
@@ -2242,7 +2427,10 @@
       else if (e.key === '-') stepLbZoom(-20);
       else if (e.key === '0') { state.lbMode = 'fit'; applyLbZoom(); }
       else if (e.key === 'Tab') {
-        var focusables = lightbox.querySelectorAll('button, a[href]');
+        var focusables = Array.prototype.filter.call(
+          lightbox.querySelectorAll('button, a[href]'),
+          function (node) { return !node.classList.contains('hidden') && !node.disabled; }
+        );
         if (focusables.length) {
           var first = focusables[0];
           var last = focusables[focusables.length - 1];
@@ -2680,6 +2868,15 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     }).then(function (st) {
+      state.platform = st.platform || '';
+      if (st.platform === 'android') {
+        var hasSavedPrefs = false;
+        try { hasSavedPrefs = Boolean(localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+        if (!hasSavedPrefs && el('concurrency')) {
+          el('concurrency').value = '4';
+          updateAdvSummaryChip();
+        }
+      }
       if (Array.isArray(st.themes) && st.themes.length) {
         state.availableThemes = st.themes;
         renderThemeSwatches();
@@ -2793,11 +2990,10 @@
     state.totalNodes = 0;
     state.completedNodes = 0;
     state.liveTrafficBytes = 0;
-    state.currentReport = { total: 0, succeeded: 0, nodes: [], topology: { inbounds: [], outbounds: [] } };
-    nodePickerDrawer.classList.add('hidden');
-    previewNodesBtn.setAttribute('aria-expanded', 'false');
+      state.currentReport = { total: 0, succeeded: 0, nodes: [], topology: { inbounds: [], outbounds: [] } };
+      closeNodePickerDrawer();
 
-    runBtn.disabled = true;
+      runBtn.disabled = true;
     runBtnLabel.textContent = '启动中…';
 
     apiFetch('/api/run', {
@@ -2823,6 +3019,7 @@
       thumbs.innerHTML = '<div class="gallery-placeholder">测速完成后将在此生成多维结果图…</div>';
       jsonLink.classList.add('hidden');
       galleryDownloadBtn.classList.add('hidden');
+      if (galleryShareBtn) galleryShareBtn.disabled = true;
       statGrid.classList.add('hidden');
       el('inboundTableBody').innerHTML = '';
       el('outboundTableBody').innerHTML = '';
@@ -2969,6 +3166,99 @@
     });
   }
 
+  function checkAndroidVpnBanner(opts) {
+    if (!androidVpnBanner) return false;
+    var bridge = androidBridge();
+    if (!bridge || typeof bridge.isVpnActive !== 'function') {
+      androidVpnBanner.classList.add('hidden');
+      return false;
+    }
+    var active = false;
+    try {
+      active = Boolean(bridge.isVpnActive());
+    } catch (e) {
+      active = false;
+    }
+    if (!active) {
+      androidVpnBanner.classList.add('hidden');
+      return false;
+    }
+    if (state.vpnBannerDismissed && !(opts && opts.force)) {
+      androidVpnBanner.classList.add('hidden');
+      return true;
+    }
+    androidVpnBanner.classList.remove('hidden');
+    return true;
+  }
+
+  function initAndroidShellUI() {
+    var bridge = androidBridge();
+    if (bridge) {
+      if (galleryCopyBtn) galleryCopyBtn.classList.add('hidden');
+      if (lbCopyBtn) lbCopyBtn.classList.add('hidden');
+      if (galleryDownloadBtn) {
+        var gSpan = galleryDownloadBtn.querySelector('span');
+        if (gSpan) gSpan.textContent = '存到相册';
+      }
+      if (lbDownloadBtn) {
+        var lSpan = lbDownloadBtn.querySelector('span');
+        if (lSpan) lSpan.textContent = '存到相册';
+      }
+      if (galleryShareBtn) {
+        galleryShareBtn.classList.remove('hidden');
+        galleryShareBtn.disabled = !state.galleryList.length;
+      }
+      if (lbShareBtn) lbShareBtn.classList.remove('hidden');
+    }
+
+    checkAndroidVpnBanner();
+
+    if (recheckVpnBtn) {
+      recheckVpnBtn.addEventListener('click', function () {
+        state.vpnBannerDismissed = false;
+        var active = checkAndroidVpnBanner({ force: true });
+        if (active) {
+          showToast('仍检测到活跃 VPN / 代理，建议先关闭后再测速', 'warn');
+        } else {
+          showToast('未检测到活跃 VPN / 代理', 'ok');
+        }
+      });
+    }
+
+    if (dismissVpnBtn) {
+      dismissVpnBtn.addEventListener('click', function () {
+        state.vpnBannerDismissed = true;
+        if (androidVpnBanner) androidVpnBanner.classList.add('hidden');
+      });
+    }
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        checkAndroidVpnBanner();
+      }
+    });
+  }
+
+  window.__nekoHandleBack = function () {
+    if (lightbox && lightbox.classList.contains('open')) {
+      closeLightbox();
+      return true;
+    }
+    if (state.historyPopoverOpen || (historyPopover && !historyPopover.classList.contains('hidden'))) {
+      closeHistoryPopover();
+      return true;
+    }
+    if (envGeoPopover && !envGeoPopover.classList.contains('hidden')) {
+      setEnvPopoverOpen(false, false);
+      return true;
+    }
+    if (nodePickerDrawer && !nodePickerDrawer.classList.contains('hidden')) {
+      closeNodePickerDrawer();
+      return true;
+    }
+    return false;
+  };
+
   // 初始化
   loadRecentSubs();
   loadPrefs();
@@ -2976,5 +3266,6 @@
   syncModuleVisuals();
   updateAdvSummaryChip();
   initTopoSplitter();
+  initAndroidShellUI();
   bootstrapRuntime();
 })();

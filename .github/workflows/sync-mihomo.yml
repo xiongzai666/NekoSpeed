@@ -90,6 +90,17 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Setup Java
+        if: steps.check.outputs.should_release == 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        if: steps.check.outputs.should_release == 'true'
+        uses: gradle/actions/setup-gradle@v6
+
       - name: Install CJK Fonts for Render Tests
         if: steps.check.outputs.should_release == 'true'
         run: |
@@ -172,7 +183,144 @@ jobs:
           done
 
           rm -rf dist/.stage
-          (cd dist/release && sha256sum * > SHA256SUMS.txt)
+
+      - name: Build Android APK (arm64-v8a)
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.tag_name }}"
+          if [[ "$VERSION" == v* ]]; then
+            VERSION_NAME="${VERSION#v}"
+          else
+            VERSION_NAME="0.3.0-${GITHUB_SHA:0:7}"
+          fi
+          VERSION_CODE=$(( 10#$(date -u +%y%m%d) * 1000 + (${GITHUB_RUN_NUMBER:-1} % 1000) ))
+
+          NDK_HOME="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
+          if [ -z "$NDK_HOME" ] && [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/ndk" ]; then
+            NDK_HOME=$(ls -d "${ANDROID_HOME}"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+          fi
+          if [ -z "$NDK_HOME" ]; then
+            echo "::error::Android NDK not found in runner environment"
+            exit 1
+          fi
+
+          NDK_BIN="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC=""
+          for api in 26 21; do
+            if [ -x "${NDK_BIN}/aarch64-linux-android${api}-clang" ]; then
+              CC="${NDK_BIN}/aarch64-linux-android${api}-clang"
+              break
+            fi
+          done
+          if [ -z "$CC" ]; then
+            echo "::error::aarch64-linux-android26/21-clang not found in ${NDK_BIN}"
+            exit 1
+          fi
+
+          echo "==> Using NDK CC: ${CC}"
+          OUT_SO="android/app/src/main/jniLibs/arm64-v8a/libnekospeed.so"
+          mkdir -p "$(dirname "$OUT_SO")"
+          PAGE_FLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+          CGO_ENABLED=1 \
+          GOOS=android \
+          GOARCH=arm64 \
+          CC="$CC" \
+          CGO_LDFLAGS="$PAGE_FLAGS" \
+            go build -trimpath \
+              -ldflags "-s -w -linkmode=external -extldflags '${PAGE_FLAGS}' -X nekospeed/internal/runner.Version=${VERSION}" \
+              -o "$OUT_SO" ./cmd/nekospeed
+
+          ls -lh "$OUT_SO"
+          python3 - "$OUT_SO" <<'PY'
+          import subprocess, sys
+          out = subprocess.check_output(["readelf", "-lW", sys.argv[1]], text=True)
+          print(out)
+          loads = []
+          for line in out.splitlines():
+              parts = line.split()
+              if parts and parts[0] == "LOAD":
+                  align = int(parts[-1], 16)
+                  loads.append((line.strip(), align))
+          assert loads, "No ELF LOAD segments found"
+          bad = [(l, hex(a)) for l, a in loads if a < 0x4000]
+          assert not bad, f"Unaligned ELF LOAD segments (< 0x4000): {bad}"
+          print(f"Verified {len(loads)} ELF LOAD segments >= 0x4000 (16 KB)")
+          PY
+
+          FONT_DST="android/app/src/main/assets/fonts/NotoSansCJKsc-Regular.otf"
+          mkdir -p "$(dirname "$FONT_DST")"
+          if [ ! -f "$FONT_DST" ] || [ "$(wc -c < "$FONT_DST")" -le 5242880 ]; then
+            curl -fsSL -o "$FONT_DST" \
+              "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" \
+            || curl -fsSL -o "$FONT_DST" \
+              "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+          fi
+          FONT_SIZE=$(wc -c < "$FONT_DST")
+          echo "Bundled font size: ${FONT_SIZE} bytes"
+          if [ "$FONT_SIZE" -le 5242880 ]; then
+            echo "::error::NotoSansCJKsc-Regular.otf is unexpectedly small (${FONT_SIZE} bytes)"
+            exit 1
+          fi
+
+          if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${KEYSTORE_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ] && [ -n "${KEY_PASS:-}" ]; then
+            KEYSTORE_FILE="${RUNNER_TEMP}/release.keystore"
+            printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > "$KEYSTORE_FILE"
+            if [ ! -s "$KEYSTORE_FILE" ]; then
+              echo "::error::Decoded ANDROID_KEYSTORE_BASE64 is empty"
+              exit 1
+            fi
+            export ANDROID_KEYSTORE_PATH="$KEYSTORE_FILE"
+            export ANDROID_KEYSTORE_PASSWORD="$KEYSTORE_PASS"
+            export ANDROID_KEY_ALIAS="$KEY_ALIAS"
+            export ANDROID_KEY_PASSWORD="$KEY_PASS"
+            echo "::notice::Using configured release keystore for Android APK signing."
+          else
+            echo "::notice::ANDROID_KEYSTORE_* secrets not fully configured; Gradle will fall back to debug signing."
+          fi
+
+          echo "==> Building Android APK: versionName=${VERSION_NAME}, versionCode=${VERSION_CODE}"
+          (
+            cd android
+            chmod +x gradlew
+            ./gradlew testReleaseUnitTest assembleRelease \
+              -PversionName="$VERSION_NAME" \
+              -PversionCode="$VERSION_CODE" \
+              --no-daemon
+          )
+
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "::error::Expected release APK not found at ${APK_PATH}"
+            ls -la android/app/build/outputs/apk/release/ || true
+            exit 1
+          fi
+
+          APKSIGNER=$(ls -d "${ANDROID_HOME}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under ${ANDROID_HOME}/build-tools/"
+            exit 1
+          fi
+          echo "==> Verifying APK signature via ${APKSIGNER}"
+          "$APKSIGNER" verify --print-certs "$APK_PATH"
+
+          mkdir -p dist/release
+          cp "$APK_PATH" "dist/release/nekospeed_${VERSION}_android-arm64.apk"
+
+      - name: Generate unified SHA256SUMS.txt
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          cd dist/release
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
         if: steps.check.outputs.should_release == 'true'
@@ -190,5 +338,6 @@ jobs:
               - 多库协同离线 GeoIP 引擎（`GeoCN.mmdb` + `ipinfo_lite.mmdb` / `GeoLite2-ASN.mmdb` + `GeoLite2-City.mmdb`），支持便携目录自动发现、并发更新校验与中文化地区/城市拓扑渲染
               - RFC 5780 STUN NAT 探测增强（优先使用支持 `OTHER-ADDRESS` 的标准服务器并直连解析绕过 Fake-IP，避免 NAT 类型误判）
               - 升级版内嵌 WebUI 控制台（环境与 GeoIP 状态浮层、智能粘贴识别、按需挑节点、实时单节点流式上屏与延迟/解锁可视化、免重测快速重绘、全宽报告画廊与同源安全防护）
+              - Android 轻量 WebView 壳端（复用内嵌 WebUI、`jniLibs` W^X 兼容与 16 KB ELF 页对齐、`NekoAndroid` JS 桥接与前台服务保活，自动构建 `nekospeed_<tag>_android-arm64.apk`）
               - Windows 版支持直接双击 `nekospeed-windows-amd64.exe` 一键启动 WebUI (`http://127.0.0.1:18189`)
           files: dist/release/*

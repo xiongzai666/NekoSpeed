@@ -4,7 +4,7 @@
 
 # NekoSpeed
 
-机场（代理订阅）批量测速与检测工具。基于 [mihomo](https://github.com/MetaCubeX/mihomo) 内核拨号，支持一键输出 MiaoKo 风格 PNG 结果图与结构化 JSON，并提供零外部依赖的内嵌 Web UI 与原生 Android 客户端。
+机场（代理订阅）批量测速与检测工具。基于 [mihomo](https://github.com/MetaCubeX/mihomo) 内核拨号，支持一键输出 MiaoKo 风格 PNG 结果图与结构化 JSON，并提供零外部依赖的内嵌 Web UI 与轻量 WebView Android 客户端。
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev)
@@ -67,11 +67,11 @@
 # 仅构建当前平台二进制
 go build -o nekospeed ./cmd/nekospeed
 
-# 交叉编译桌面全平台（Windows / macOS / Linux）及 Android（需配置 NDK）
+# 交叉编译桌面全平台（Windows / macOS / Linux）及 Android jniLibs（需配置 NDK）
 ./scripts/build.sh
 ```
 
-跨平台产物默认输出至 `dist/` 目录，包含 `windows-amd64`、`windows-arm64`、`darwin-amd64`、`darwin-arm64`、`linux-amd64`、`linux-arm64`。
+跨平台产物默认输出至 `dist/` 目录，包含 `windows-amd64`、`windows-arm64`、`darwin-amd64`、`darwin-arm64`、`linux-amd64`、`linux-arm64`；若环境中已安装 Android NDK，还将同步编译 `android/app/src/main/jniLibs/arm64-v8a/libnekospeed.so`（设置 `ANDROID_ABIS="arm64 amd64"` 可同时构建 `x86_64` 模拟器库）。
 
 ---
 
@@ -190,35 +190,43 @@ go build -o nekospeed ./cmd/nekospeed
 
 ## Android 客户端
 
-`android/` 目录提供基于 Jetpack Compose + Material 3 的原生 Android 客户端，内部嵌入交叉编译后的 Go 二进制与中文字体，实现离线包内一键调用与结果渲染：
+`android/` 目录提供基于系统 `WebView` 的轻量级 Android 壳端（`ComponentActivity` + `enableEdgeToEdge()`），直接承载内嵌 Web UI 并以本地服务形式驱动 Go 核心引擎，使移动端与桌面端共享完整测速、流媒体/AI 解锁、拓扑渲染与报告画廊能力：
 
-- **主要特性**：支持订阅 URL / 粘贴内容双输入、5 项测试全覆盖（默认并发节点数 `concurrency = 4`，`threads = 8`，`duration = 10`）、`Node / Unlock / Topology / Images` 四 Tab 报告、PNG 保存至系统相册与分享、历史归档管理、前台服务（`NekoSpeedService`）保活与通知栏取消、VPN 冲突检测。
-- **兼容性**：覆盖 `arm64` / `amd64` 双架构（Go 二进制经 gzip 压缩至约 10 MB），内置 `NotoSansCJKsc-Regular.otf` 兜底厂商 ROM 字体兼容问题；自动创建应用私有 `files/geoip` 并通过 `NEKOSPEED_GEOIP_DIR` 注入子进程环境（兼容直接执行与 Android 14+ SELinux `/system/bin/linker64` 回退）。
+- **W^X 兼容与 16 KB 页对齐**：通过 Android NDK（优先 `aarch64-linux-android26-clang`，兼容回退 `android21`）开启 `CGO_ENABLED=1` 与 `-linkmode=external`，附加 `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384` 编译为 `android/app/src/main/jniLibs/arm64-v8a/libnekospeed.so`；配合 `useLegacyPackaging = true` 与 `extractNativeLibs="true"` 由系统解压至 `nativeLibraryDir`，彻底绕过 Android 10+ 应用私有目录禁止执行代码的 W^X（Write XOR Execute）限制，并满足 Android 15+ 16 KB 内存页设备要求。
+- **前台服务保活与本地安全通信**：`NekoSpeedServerService`（`foregroundServiceType="dataSync"`）释放内置 `NotoSansCJKsc-Regular.otf` 至 `files/fonts/`，自动创建 `files/geoip` 与 `files/out` 并注入 `NEKOSPEED_GEOIP_DIR`、`NEKOSPEED_OUT_DIR`、`NEKOSPEED_FONT_PATH`、`NEKOSPEED_ANDROID_SHELL=1`、`NEKOSPEED_NO_BROWSER=1`，以随机 32 位 Hex 令牌启动 `libnekospeed.so -web 127.0.0.1:0 -web-token <token>`；通过 `network_security_config.xml` 仅对 `127.0.0.1` 放行明文回环连接，同时适配 Android 15 `onTimeout` 回调收敛，Android 端默认并发数设为 `concurrency = 4`。
+- **`NekoAndroid` JS 桥接**：通过 `NekoWebBridge` 向前端暴露 `window.NekoAndroid`，支持 VPN / 全局代理冲突横幅提醒、原生剪贴板复制、PNG「存到相册」（`Pictures/NekoSpeed`，Android 10 以下回退系统分享）、系统「分享」、UTF-8 BOM CSV 导出、深浅主题与运行态同步，以及 `window.__nekoHandleBack()` 分层返回键关闭浮层。
 - **常用构建命令**：
 
 ```bash
-./scripts/build.sh            # 交叉编译并压缩 Android arm64/amd64 二进制，自动下载内置字体
+# 编译桌面全平台及 Android arm64-v8a libnekospeed.so，并下载内置中文字体
+# 如需追加 x86_64 模拟器支持，可执行：ANDROID_ABIS="arm64 amd64" ./scripts/build.sh
+./scripts/build.sh
+
 cd android
-./gradlew assembleDebug       # 构建调试版 APK
-./gradlew assembleRelease     # 构建正式版 APK（需自备 android/keystore.properties）
+./gradlew testReleaseUnitTest assembleRelease   # 运行 JVM 单测并构建 Release APK（未配正式签名时自动回退 debug 签名）
 ```
 
-> 详细架构与开发记录见 [Android 客户端开发文档](docs/android-client.md) 和 [Android 实施进度](docs/android-progress.md)。
+> 详细架构、JS 桥接契约与签名配置说明见 [Android 客户端开发文档](docs/android-client.md)，历史阶段记录见 [Android 实施进度](docs/android-progress.md)。
 
 ---
 
 ## GitHub Actions 自动化流水线
 
-工作流配置位于 `.github/workflows/`（已升级至 Node 24 原生 Action 主版本：`actions/checkout@v7`、`actions/setup-go@v7`、`softprops/action-gh-release@v3`）：
+工作流配置位于 `.github/workflows/`，全部采用 Node 24 原生 Action 主版本（`actions/checkout@v7`、`actions/setup-go@v7`、`actions/setup-java@v6`、`gradle/actions/setup-gradle@v6`、`actions/upload-artifact@v7`、`actions/download-artifact@v8`、`softprops/action-gh-release@v3`）：
 
 1. **[Sync Upstream & Mihomo Auto Release](.github/workflows/sync-mihomo.yml)**：
    - 每日 UTC `02:00`（北京时间 `10:00`）定时检查，亦支持在 Actions 页面通过 `Run workflow` 手动触发（可选 `force_release` 强制基于当前代码重发版）。
    - 自动拉取上游 `KaWaIDeSuNe/NekoSpeed` 的 `main` 分支：可快进/无冲突则直接合并；若存在文件冲突，则中止合并并将上游提交推至 `sync/upstream-main` 自动创建 PR，防止覆盖本地改进。
-   - 查询 `MetaCubeX/mihomo` 最新正式版 Tag 并更新依赖，运行全量单测与 6 平台交叉编译后自动发布至 Releases；若同 UTC 日期已有同名 Tag，自动追加短提交号（如 `v2026.11.13-v1.19.34-<sha>`）避免冲突。
+   - 查询 `MetaCubeX/mihomo` 最新正式版 Tag 并更新依赖，运行全量单测、6 平台交叉编译与 Android `arm64-v8a` APK 构建（含 `readelf -lW` 16 KB 页对齐检查与 `apksigner` 验签），将 `nekospeed_<tag>_android-arm64.apk` 并入统一 `SHA256SUMS.txt` 自动发布至 Releases；若同 UTC 日期已有同名 Tag，自动追加短提交号（如 `v2026.11.13-v1.19.34-<sha>`）避免冲突。
 2. **[CI & Tag Release](.github/workflows/ci-release.yml)**：
-   - 监听 `main` / `master` / `feat/**` / `fork/**` 分支推送、PR 与 `v*` 标签推送，执行全量单元测试并在打标签发布时构建多平台压缩包与 `SHA256SUMS.txt`。
+   - 监听 `main` / `master` / `feat/**` / `fork/**` 分支推送、PR 与 `v*` 标签推送，分为 3 个作业：
+     - `test-and-build`：执行 Go 单元测试并构建 6 桌面平台产物（上传 `desktop-release`）。
+     - `build-android`（并行）：在分支、PR 与标签流水线中均自动交叉编译 `libnekospeed.so`、校验 16 KB ELF `LOAD` 对齐、下载 `NotoSansCJKsc-Regular.otf`、执行 `./gradlew testReleaseUnitTest assembleRelease` 与 `apksigner` 验签，产出 `nekospeed_<version>_android-arm64.apk`（上传 `android-release`）。
+     - `release`：仅在 `v*` 标签推送时触发，汇总 `desktop-release` 与 `android-release` 产物，生成统一 `SHA256SUMS.txt` 并发布 GitHub Release。
 3. **[Update GeoIP Databases](.github/workflows/update-geoip.yml)**：
    - 每日 UTC `03:00`（北京时间 `11:00`）定时拉取 `GeoCN.mmdb`、`GeoLite2-City.mmdb`、`GeoLite2-ASN.mmdb`；若仓库 Secrets 中配置了 `IPINFO_TOKEN`（推荐免费申请，切勿写入代码），同步拉取日更 `ipinfo_lite.mmdb`，校验后发布至固定 Release 标签 `geoip-latest`（`make_latest: false`，不干扰软件版本发布）。
+
+> **可选 Android Release 正式签名 Secrets**：如需让 CI 使用自有发布证书签名 APK，可在仓库 `Settings -> Secrets and variables -> Actions` 配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS` 与 `ANDROID_KEY_PASSWORD` 4 项 Secrets。仅当 4 项均非空时 CI 才会解码密钥库至 `$RUNNER_TEMP/release.keystore` 签名；未配置时自动发出 `::notice::` 并由 Gradle 回退为调试签名，确保开箱即可产出可安装测试的 APK。
 
 ---
 
@@ -238,13 +246,13 @@ NekoSpeed/
 │   ├── render/                    # 纯 Go PNG 报告渲染引擎（21 款主题、系统字体自适应）
 │   ├── report/                    # JSON 报告持久化与契约校验
 │   └── model/                     # 共享数据模型与拨号器抽象
-├── android/                       # Android Jetpack Compose 客户端工程
-├── scripts/                       # build.sh（全平台及 Android 二进制构建）与 package.sh
-├── .github/workflows/             # CI 测试、上游/mihomo 同步与多平台发布工作流
+├── android/                       # Android 轻量 WebView 壳端工程（Gradle + Kotlin + NekoAndroid 桥接）
+├── scripts/                       # build.sh（全平台与 Android jniLibs 原生库构建）与 package.sh
+├── .github/workflows/             # CI 测试、上游/mihomo 同步与多平台/APK 发布工作流
 └── docs/
     ├── troubleshooting.md         # 常见故障排查与核心工程防护说明
-    ├── android-client.md          # Android 客户端架构、构建与模块说明
-    ├── android-progress.md        # Android 各阶段实施进度与真机测试记录
+    ├── android-client.md          # Android 轻量 WebView 壳端架构、JS 桥接与 CI 构建说明
+    ├── android-progress.md        # Android 历史阶段实施进度与真机测试记录
     └── desktop-client.md          # 原生桌面客户端（Fyne）技术规划方案（未实现）
 ```
 
@@ -260,7 +268,7 @@ NekoSpeed/
 | `NotoSansCJKsc-Regular.otf`（Android 内置） | SIL Open Font License 1.1；厂商 ROM 字体异常时的 PNG 渲染兜底 |
 | `golang.org/x/image`、`golang.org/x/text`、`github.com/miekg/dns` | BSD-3-Clause；图像渲染、GBK 转码与多源 DNS 解析 |
 | `gopkg.in/yaml.v3`、`github.com/pion/stun`、`github.com/oschwald/maxminddb-golang` | MIT；YAML 配置、STUN NAT 探测与 MMDB 读取 |
-| Android 端（Compose / Navigation / Coil / Coroutines 等） | Apache-2.0 |
+| Android 端（AndroidX Core / Activity KTX / Kotlin Coroutines 等） | Apache-2.0 |
 | GeoIP 数据库与在线接口 | 离线库支持 `GeoCN.mmdb`（[ljxi/GeoCN](https://github.com/ljxi/GeoCN)）、`ipinfo_lite.mmdb`（IP address data powered by [IPinfo](https://ipinfo.io), **CC BY-SA 4.0**）与 `GeoLite2-City.mmdb` / `GeoLite2-ASN.mmdb`（MaxMind GeoLite2, **CC BY-SA 4.0**，镜像来自 [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb)）；可通过环境变量 `NEKOSPEED_GEOIP_DIR` 自定义库目录、`NEKOSPEED_IPINFO_TOKEN` 配置本地直下 Token（GitHub Actions 自动发布请在仓库 Secrets 中设置 `IPINFO_TOKEN`）。未配置离线库时在线兜底使用 `ip-api.com`、`api.ip.sb`、`ipwho.is`、`get.geojs.io`、Cloudflare Trace、纯真 CZ88、Mir6、百度大数据、太平洋电脑网、Bilibili 接口 |
 
 **免责声明**：本项目仅用于网络质量测试与学习研究，请遵守当地法律法规与服务商条款；测速及解锁结果受本地网络、节点负载与第三方平台策略变更影响，仅供参考。

@@ -89,6 +89,9 @@ func ServeWithToken(addr, token string) error {
 	} else {
 		fmt.Printf("Web UI 已启动：%s\n", url)
 	}
+	if os.Getenv("NEKOSPEED_ANDROID_SHELL") == "1" {
+		fmt.Printf("NEKOSPEED_WEB_READY=%s\n", url)
+	}
 	openBrowser(url)
 
 	srv := &http.Server{
@@ -99,6 +102,9 @@ func ServeWithToken(addr, token string) error {
 }
 
 func outBaseDir() string {
+	if envOut := strings.TrimSpace(os.Getenv("NEKOSPEED_OUT_DIR")); envOut != "" {
+		return envOut
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		exe = ""
@@ -491,6 +497,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"themes":    render.ThemeNames(),
 		"netEnv":    nodepool.GetNetworkEnv(),
 		"geoip":     s.geoipStatusPayload(),
+		"platform":  runtime.GOOS,
 	})
 }
 
@@ -859,7 +866,11 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		req.Duration = 10
 	}
 	if req.Concurrency <= 0 {
-		req.Concurrency = 6
+		if runtime.GOOS == "android" {
+			req.Concurrency = 4
+		} else {
+			req.Concurrency = 6
+		}
 	}
 	if req.PingCount <= 0 {
 		req.PingCount = 4
@@ -1294,9 +1305,9 @@ func (h *hub) unsubscribe(ch chan string) {
 	h.mu.Unlock()
 }
 
-// openBrowser 按平台打开默认浏览器，失败仅提示手动访问。
+// openBrowser 按平台打开默认浏览器，失败仅提示手动访问；Android 下自动跳过。
 func openBrowser(url string) {
-	if os.Getenv("NEKOSPEED_NO_BROWSER") != "" {
+	if runtime.GOOS == "android" || os.Getenv("NEKOSPEED_NO_BROWSER") != "" {
 		return
 	}
 	go func() {

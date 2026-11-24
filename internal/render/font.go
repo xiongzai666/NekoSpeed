@@ -126,9 +126,12 @@ var book = &fontBook{
 	faces: make(map[faceKey]font.Face),
 }
 
-// loadFont 按 meta.FontPath → 系统候选路径的顺序加载字体。
+// loadFont 按 meta.FontPath → NEKOSPEED_FONT_PATH → 系统候选路径的顺序加载字体。
 func loadFont(custom string) (*opentype.Font, error) {
 	key := strings.TrimSpace(custom)
+	if key == "" {
+		key = strings.TrimSpace(os.Getenv("NEKOSPEED_FONT_PATH"))
+	}
 	book.mu.Lock()
 	defer book.mu.Unlock()
 	if f, ok := book.fonts[key]; ok {

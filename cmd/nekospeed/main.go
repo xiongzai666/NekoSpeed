@@ -48,12 +48,25 @@ func main() {
 	)
 	flag.Parse()
 
+	outFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "o" {
+			outFlagSet = true
+		}
+	})
+
 	// Windows 下直接双击 exe（无命令行参数）时默认启动内嵌 Web UI，避免黑框一闪而过。
 	if runtime.GOOS == "windows" && len(os.Args) == 1 && *web == "" && *source == "" && *config == "" {
 		*web = "127.0.0.1:18189"
 	}
 
 	if *web != "" {
+		if fp := strings.TrimSpace(*fontPath); fp != "" {
+			_ = os.Setenv("NEKOSPEED_FONT_PATH", fp)
+		}
+		if outFlagSet && strings.TrimSpace(*outDir) != "" {
+			_ = os.Setenv("NEKOSPEED_OUT_DIR", strings.TrimSpace(*outDir))
+		}
 		addr := *web
 		if !strings.Contains(addr, ":") {
 			addr = ":" + addr

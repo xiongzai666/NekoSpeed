@@ -1,27 +1,14 @@
-# Compose / Material3
--keep class androidx.compose.** { *; }
--dontwarn androidx.compose.**
+# 保留注解（@JavascriptInterface 等运行时注解必需）
+-keepattributes *Annotation*
 
-# kotlinx-serialization（反射序列化需保留 @Serializable 类与 serializer）
--keepattributes *Annotation*, InnerClasses
--dontnote kotlinx.serialization.AnnotationsKt
--keepclassmembers class kotlinx.serialization.json.** {
-    *** Companion;
+# 保留 WebView JS Bridge 类及其带 @JavascriptInterface 的方法
+-keep class com.nekospeed.android.bridge.NekoWebBridge { *; }
+-keepclassmembers class com.nekospeed.android.bridge.NekoWebBridge {
+    @android.webkit.JavascriptInterface <methods>;
 }
--keepclasseswithmembers class kotlinx.serialization.json.** {
-    kotlinx.serialization.KSerializer serializer(...);
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
 }
--keep,includedescriptorclasses class com.nekospeed.android.data.model.**$$serializer { *; }
--keepclassmembers class com.nekospeed.android.data.model.** {
-    *** Companion;
-}
--keepclasseswithmembers class com.nekospeed.android.data.model.** {
-    kotlinx.serialization.KSerializer serializer(...);
-}
-
-# Coil
--dontwarn coil.**
--keep class coil.** { *; }
 
 # Kotlin 协程
 -dontwarn kotlinx.coroutines.**
